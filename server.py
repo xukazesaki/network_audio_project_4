@@ -15,10 +15,12 @@ server_running = True
 last_received_audio = None
 
 
+# 确保服务端运行前所需的本地存储目录已经存在。
 def ensure_server_dirs():
     os.makedirs(SERVER_RECEIVE_DIR, exist_ok=True)
 
 
+# 安全地向指定用户发送一个数据包，发送失败时自动清理连接。
 def _safe_send(username, msg_type, sender, data_dict=None, payload=None) -> bool:
     with clients_lock:
         conn = clients.get(username)
@@ -34,6 +36,7 @@ def _safe_send(username, msg_type, sender, data_dict=None, payload=None) -> bool
         return False
 
 
+# 将当前在线用户名单广播给所有已连接客户端。
 def broadcast_users():
     with clients_lock:
         names = sorted(clients.keys())
@@ -42,6 +45,7 @@ def broadcast_users():
         _safe_send(name, "user_list", "Server", {"users": names})
 
 
+# 为服务端操作者打印一个带编号的在线用户列表。
 def list_clients():
     with clients_lock:
         names = sorted(clients.keys())
@@ -55,6 +59,7 @@ def list_clients():
         print(f"    {idx}. {name}")
 
 
+    # 移除一个已断开的客户端，并刷新全局在线列表。
 def remove_client(username):
     if not username:
         return
@@ -71,6 +76,7 @@ def remove_client(username):
         broadcast_users()
 
 
+# 从服务端向所有在线用户发送文本消息。
 def send_text_to_all(text: str):
     with clients_lock:
         recipients = list(clients.keys())
@@ -79,10 +85,12 @@ def send_text_to_all(text: str):
         _safe_send(username, "text", "Server", {"msg": text})
 
 
+# 从服务端向指定用户发送一条文本消息。
 def send_text_to_client(target: str, text: str) -> bool:
     return _safe_send(target, "text", "Server", {"msg": text})
 
 
+# 从服务端向指定用户发送本地音频文件。
 def send_audio_to_client(target: str, file_path: str) -> bool:
     if not os.path.exists(file_path):
         return False
@@ -96,6 +104,7 @@ def send_audio_to_client(target: str, file_path: str) -> bool:
     return _safe_send(target, "audio", "Server", {}, data)
 
 
+# 保存最近一次收到的离线音频，便于之后回放。
 def save_incoming_audio(sender: str, payload: bytes):
     global last_received_audio
 
@@ -123,6 +132,7 @@ def save_incoming_audio(sender: str, payload: bytes):
     print(f"[AUDIO] 已保存来自 {sender} 的音频: {path}")
 
 
+# 处理单个客户端连接，包括登录、收发消息和转发。
 def handle_client(conn, addr):
     my_name = None
     print(f"[+] 新连接: {addr}")
@@ -198,6 +208,7 @@ def handle_client(conn, addr):
         remove_client(my_name)
 
 
+# 打印服务端控制台支持的命令列表。
 def print_help():
     print("\n服务端可用命令：")
     print("  help                         查看命令")
@@ -210,6 +221,7 @@ def print_help():
     print("  quit                         关闭服务器\n")
 
 
+# 运行服务端控制台输入循环，处理管理员命令。
 def server_input_loop(server_socket: socket.socket):
     global server_running
 
@@ -326,6 +338,7 @@ def server_input_loop(server_socket: socket.socket):
             pass
 
 
+# 读取 wav 文件内容并返回原始 PCM 数据，供服务端播放。
 def _read_wave_as_pcm(file_path: str) -> bytes:
     with wave.open(file_path, "rb") as wf:
         return wf.readframes(wf.getnframes())

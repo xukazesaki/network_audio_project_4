@@ -6,6 +6,7 @@ from audio_manager import AudioManager
 from config import HOST, PORT
 
 class ChatClient:
+    # 初始化轻量级图形客户端并连接服务器。
     def __init__(self, root):
         self.root = root
         self.root.title("IP电话终端")
@@ -39,6 +40,7 @@ class ChatClient:
         send_packet(self.sock, "login", self.name)
         threading.Thread(target=self.receive_loop, daemon=True).start()
 
+    # 将当前选中的用户设为通话目标。
     def select_user(self, event=None):
         try:
             self.target_user = self.user_listbox.get(self.user_listbox.curselection())
@@ -46,6 +48,7 @@ class ChatClient:
         except:
             messagebox.showwarning("提醒", "请先在列表双击选择一个好友")
 
+    # 录制一段短语音并发送给当前目标用户。
     def record_and_send(self):
         if not self.target_user:
             return messagebox.showwarning("错误", "请先选择呼叫对象")
@@ -55,6 +58,7 @@ class ChatClient:
             self.display(f"我 -> {self.target_user}: [语音已发送]")
         threading.Thread(target=task).start()
 
+    # 持续接收服务器消息，并更新界面显示。
     def receive_loop(self):
         while True:
             packet = recv_packet(self.sock)
@@ -69,11 +73,13 @@ class ChatClient:
                 self.display(f"{header['sender']}: [语音来电]")
                 threading.Thread(target=self.audio.play_audio, args=(payload,)).start()
 
+    # 刷新侧边栏中的在线用户列表。
     def update_listbox(self, users):
         self.user_listbox.delete(0, tk.END)
         for u in users:
             if u != self.name: self.user_listbox.insert(tk.END, u)
 
+    # 在聊天显示区域追加一行文本。
     def display(self, msg):
         self.chat_area.insert(tk.END, msg + "\n")
         self.chat_area.see(tk.END)

@@ -12,7 +12,6 @@ from audio_manager import AudioManager
 from config import (
     CHANNELS,
     CHUNK,
-    CONTACTS_FILE,
     FORMAT,
     HOST,
     JITTER_BUFFER_MAXLEN,
@@ -21,29 +20,43 @@ from config import (
     RATE,
     RECEIVE_DIR,
 )
+from contact_manager import ContactManager
 from protocol import recv_packet, send_packet
 
 
 class MultiFunctionClient:
+    # 初始化主客户端窗口、通话状态以及网络和音频组件。
     def __init__(self, root):
         self.root = root
         self.root.title("综合音频终端")
-        self.root.geometry("760x700")
+        self.root.geometry("780x760")
 
         self.sock = None
         self.running = True
         self.is_recording = False
         self.buffer = collections.deque(maxlen=JITTER_BUFFER_MAXLEN)
         self.audio_manager = AudioManager()
+        self.contact_manager = ContactManager()
 
         default_name = f"User_{int(time.time()) % 1000}"
-        self.my_name = (simpledialog.askstring("用户名", "请输入用户名：", initialvalue=default_name, parent=root) or default_name).strip()
+        entered_name = simpledialog.askstring(
+            "用户名",
+            "请输入用户名：",
+            initialvalue=default_name,
+            parent=root,
+        )
+        self.my_name = (entered_name or default_name).strip() or default_name
+
         self.target_user = None
         self.online_users = []
-        self.contacts = self.load_contacts()
+        self.contacts = self.contact_manager.get_all()
         self.user_index_map = {}
         self.play_stream = None
         self.stream_pa = None
+
+        self.call_state = "IDLE"
+        self.call_peer = None
+        self.ringing_from = None
 
         self._build_ui()
         self.refresh_user_listbox()
@@ -51,10 +64,11 @@ class MultiFunctionClient:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(400, self.update_status)
 
+    # 创建联系人、聊天区、通话控制和媒体控制的完整界面布局。
     def _build_ui(self):
         self.status_label = tk.Label(
             self.root,
-            text="缓冲区: 0 | 目标: 未选择 | 在线: 0",
+            text="状态: 空闲 | 缓冲区: 0 | 目标: 未选择 | 在线: 0",
             fg="blue",
             font=("Arial", 10, "bold"),
         )
@@ -67,12 +81,12 @@ class MultiFunctionClient:
         sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
 
         tk.Label(sidebar, text="在线用户 / 联系人").pack(anchor="w")
-        self.user_listbox = tk.Listbox(sidebar, width=26, height=24, bg="#f8f8f8")
+        self.user_listbox = tk.Listbox(sidebar, width=28, height=24, bg="#f8f8f8")
         self.user_listbox.pack(fill=tk.Y, expand=True)
         self.user_listbox.bind("<<ListboxSelect>>", self.on_user_select)
         self.user_listbox.bind("<Double-Button-1>", self.on_user_select)
 
-        tk.Button(sidebar, text="刷新目标", command=self.on_user_select).pack(fill=tk.X, pady=(8, 4))
+        tk.Button(sidebar, text="设为当前目标", command=self.on_user_select).pack(fill=tk.X, pady=(8, 4))
         tk.Button(sidebar, text="保存联系人", command=self.save_contact).pack(fill=tk.X, pady=4)
         tk.Button(sidebar, text="添加/改备注", command=self.ui_add_contact).pack(fill=tk.X, pady=4)
         tk.Button(sidebar, text="删除联系人", command=self.ui_del_contact).pack(fill=tk.X, pady=4)
@@ -100,6 +114,12 @@ class MultiFunctionClient:
         tk.Button(button_row, text="发送文件", command=self.send_file, width=10).pack(side=tk.LEFT, padx=2)
         tk.Button(button_row, text="录音 5 秒发送", command=self.send_offline_voice, width=14).pack(side=tk.LEFT, padx=2)
 
+        call_row = tk.Frame(controls)
+        call_row.pack(fill=tk.X, pady=(8, 0))
+        tk.Button(call_row, text="呼叫", command=self.call_user, width=10).pack(side=tk.LEFT, padx=2)
+        tk.Button(call_row, text="接听", command=self.accept_call, width=10).pack(side=tk.LEFT, padx=2)
+        tk.Button(call_row, text="挂断", command=self.hangup, width=10).pack(side=tk.LEFT, padx=2)
+
         self.btn_mic = tk.Button(
             controls,
             text="开启实时通话",
@@ -109,6 +129,7 @@ class MultiFunctionClient:
         )
         self.btn_mic.pack(fill=tk.X, pady=8)
 
+    # 向主消息区追加一条带样式的文本。
     def log(self, msg, align="left"):
         self.chat_display.config(state="normal")
         tag = "self_msg" if align == "right" else ("system" if align == "center" else "other_msg")
@@ -116,64 +137,53 @@ class MultiFunctionClient:
         self.chat_display.config(state="disabled")
         self.chat_display.see(tk.END)
 
+    # 让后台线程安全地向界面追加日志。
     def safe_log(self, msg, align="left"):
         self.root.after(0, lambda: self.log(msg, align))
 
-    def load_contacts(self):
-        if os.path.exists(CONTACTS_FILE):
-            try:
-                import json
+    # 从联系人管理器刷新内存中的联系人缓存。
+    def refresh_contacts(self):
+        self.contacts = self.contact_manager.get_all()
 
-                with open(CONTACTS_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                return {}
-        return {}
-
-    def save_contacts_to_disk(self):
-        import json
-
-        with open(CONTACTS_FILE, "w", encoding="utf-8") as f:
-            json.dump(self.contacts, f, ensure_ascii=False, indent=2)
-
-    def add_contact(self, name, remark="常用联系人"):
-        self.contacts[name] = remark
-        self.save_contacts_to_disk()
-        self.refresh_user_listbox()
-        self.log(f"[系统] 已保存联系人: {name} ({remark})", align="center")
-
-    def delete_contact(self, name):
-        if name in self.contacts:
-            del self.contacts[name]
-            self.save_contacts_to_disk()
-            self.refresh_user_listbox()
-            self.log(f"[系统] 已删除联系人: {name}", align="center")
-
+    # 将当前目标保存为联系人，备注使用已有值或默认值。
     def save_contact(self):
         if not self.target_user:
             return messagebox.showwarning("提示", "请先选择一个目标用户")
-        remark = self.contacts.get(self.target_user, "常用联系人")
-        self.add_contact(self.target_user, remark)
+        remark = self.contact_manager.get(self.target_user, "常用联系人")
+        self.contact_manager.add(self.target_user, remark)
+        self.refresh_contacts()
+        self.refresh_user_listbox()
+        self.log(f"[系统] 已保存联系人: {self.target_user} ({remark})", align="center")
 
+    # 弹出输入框，为当前选中用户保存自定义备注。
     def ui_add_contact(self):
         if not self.target_user:
             return messagebox.showwarning("提示", "请先在左侧选择一个在线用户")
         remark = simpledialog.askstring(
             "添加好友",
             f"为 {self.target_user} 输入备注：",
-            initialvalue=self.contacts.get(self.target_user, "常用联系人"),
+            initialvalue=self.contact_manager.get(self.target_user, "常用联系人"),
             parent=self.root,
         )
         if remark:
-            self.add_contact(self.target_user, remark.strip())
+            self.contact_manager.add(self.target_user, remark.strip())
+            self.refresh_contacts()
+            self.refresh_user_listbox()
+            self.log(f"[系统] 已保存联系人: {self.target_user} ({remark.strip()})", align="center")
 
+    # 在用户确认后删除当前选中的联系人。
     def ui_del_contact(self):
         if not self.target_user:
             return messagebox.showwarning("提示", "请先选择一个联系人")
         if messagebox.askyesno("确认", f"确定要删除联系人 {self.target_user} 吗？"):
-            self.delete_contact(self.target_user)
+            self.contact_manager.delete(self.target_user)
+            self.refresh_contacts()
+            self.refresh_user_listbox()
+            self.log(f"[系统] 已删除联系人: {self.target_user}", align="center")
 
+    # 根据在线用户和已保存联系人重建侧边栏列表。
     def refresh_user_listbox(self):
+        self.refresh_contacts()
         self.user_listbox.delete(0, tk.END)
         self.user_index_map.clear()
 
@@ -194,6 +204,7 @@ class MultiFunctionClient:
             self.user_index_map[insert_index] = username
             insert_index += 1
 
+    # 根据列表选中项更新当前聊天或通话目标。
     def on_user_select(self, event=None):
         selection = self.user_listbox.curselection()
         if not selection:
@@ -204,12 +215,7 @@ class MultiFunctionClient:
         self.target_user = username
         self.log(f"[系统] 当前目标已切换为: {self.target_user}", align="center")
 
-    def require_target(self):
-        if not self.target_user:
-            messagebox.showwarning("提示", "请先选择目标用户")
-            return False
-        return True
-
+    # 建立 socket 连接，并启动接收线程和播放线程。
     def connect_server(self):
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -232,6 +238,14 @@ class MultiFunctionClient:
             self.running = False
             messagebox.showerror("错误", f"连接失败: {e}")
 
+    # 为必须先选择目标用户的操作做前置检查。
+    def require_target(self):
+        if not self.target_user:
+            messagebox.showwarning("提示", "请先选择目标用户")
+            return False
+        return True
+
+    # 向当前目标用户发送文本消息。
     def send_text(self):
         if not self.require_target():
             return
@@ -244,6 +258,7 @@ class MultiFunctionClient:
         self.log(f"我 -> {self.target_user}: {msg}", align="right")
         self.input_entry.delete(0, tk.END)
 
+    # 选择本地文件并发送给当前目标用户。
     def send_file(self):
         if not self.require_target():
             return
@@ -270,6 +285,7 @@ class MultiFunctionClient:
         except Exception as e:
             messagebox.showerror("错误", f"文件发送失败: {e}")
 
+    # 录制一段短语音，并作为离线语音消息发送。
     def send_offline_voice(self):
         if not self.require_target():
             return
@@ -285,19 +301,67 @@ class MultiFunctionClient:
 
         threading.Thread(target=task, daemon=True).start()
 
-    def toggle_realtime_mic(self):
+    # 向当前选中的目标用户发起呼叫请求。
+    def call_user(self):
         if not self.require_target():
+            return
+        if self.call_state != "IDLE":
+            messagebox.showwarning("提示", "当前已有通话流程，请先挂断")
+            return
+
+        self.call_state = "CALLING"
+        self.call_peer = self.target_user
+        send_packet(self.sock, "call", self.my_name, {"target": self.target_user})
+        self.log(f"[系统] 正在呼叫 {self.target_user}...", align="center")
+
+    # 接听当前正在响铃的来电。
+    def accept_call(self):
+        if self.call_state != "RINGING" or not self.ringing_from:
+            messagebox.showwarning("提示", "当前没有待接听来电")
+            return
+
+        self.call_peer = self.ringing_from
+        self.target_user = self.ringing_from
+        self.call_state = "TALKING"
+        send_packet(self.sock, "accept", self.my_name, {"target": self.ringing_from})
+        self.log(f"[系统] 已接听 {self.ringing_from}", align="center")
+        self.ringing_from = None
+
+    # 挂断当前正在进行或等待中的通话。
+    def hangup(self):
+        peer = self.call_peer or self.ringing_from or self.target_user
+        if not peer:
+            messagebox.showwarning("提示", "当前没有可挂断的通话")
+            return
+
+        send_packet(self.sock, "hangup", self.my_name, {"target": peer})
+        self._reset_call_state()
+        self.log("[系统] 已挂断", align="center")
+
+    # 将所有通话相关状态重置为空闲状态。
+    def _reset_call_state(self):
+        self.call_state = "IDLE"
+        self.call_peer = None
+        self.ringing_from = None
+        self.is_recording = False
+        self.root.after(0, lambda: self.btn_mic.config(text="开启实时通话", bg="#eeeeee"))
+
+    # 在通话进行中开启或停止实时麦克风流发送。
+    def toggle_realtime_mic(self):
+        if self.call_state != "TALKING":
+            messagebox.showwarning("提示", "请先建立通话，再开启实时语音")
             return
 
         self.is_recording = not self.is_recording
         if self.is_recording:
             self.btn_mic.config(text="停止实时通话", bg="#ff9999")
             threading.Thread(target=self.record_stream_thread, daemon=True).start()
-            self.log(f"[系统] 已开始向 {self.target_user} 发送实时语音", align="center")
+            self.log(f"[系统] 已开始与 {self.call_peer} 实时通话", align="center")
         else:
             self.btn_mic.config(text="开启实时通话", bg="#eeeeee")
             self.log("[系统] 已停止实时语音", align="center")
 
+    # 持续采集麦克风数据块，并实时发送给通话对端。
     def record_stream_thread(self):
         pa = pyaudio.PyAudio()
         stream = None
@@ -309,9 +373,9 @@ class MultiFunctionClient:
                 input=True,
                 frames_per_buffer=CHUNK,
             )
-            while self.running and self.is_recording:
+            while self.running and self.is_recording and self.call_state == "TALKING" and self.call_peer:
                 data = stream.read(CHUNK, exception_on_overflow=False)
-                send_packet(self.sock, "stream", self.my_name, {"target": self.target_user}, data)
+                send_packet(self.sock, "stream", self.my_name, {"target": self.call_peer}, data)
         except Exception as e:
             if self.running:
                 self.safe_log(f"[系统] 实时语音发送失败: {e}", align="center")
@@ -326,6 +390,7 @@ class MultiFunctionClient:
             pa.terminate()
             self.root.after(0, lambda: self.btn_mic.config(text="开启实时通话", bg="#eeeeee"))
 
+    # 持续接收服务端数据包，并按消息类型分发处理。
     def receive_thread(self):
         while self.running:
             header, payload = recv_packet(self.sock)
@@ -347,7 +412,7 @@ class MultiFunctionClient:
                 self.safe_log(f"{sender}: [语音消息]", align="left")
                 threading.Thread(target=self.audio_manager.play_audio, args=(payload,), daemon=True).start()
             elif msg_type == "stream":
-                if payload:
+                if payload and self.call_state == "TALKING":
                     self.buffer.append(payload)
             elif msg_type == "file":
                 filename = header.get("filename", "new_file.bin")
@@ -356,13 +421,31 @@ class MultiFunctionClient:
                 with open(save_path, "wb") as f:
                     f.write(payload)
                 self.safe_log(f"{sender}: [文件] {filename} 已保存到 {save_path}", align="left")
+            elif msg_type == "call":
+                self.ringing_from = sender
+                self.call_state = "RINGING"
+                self.safe_log(f"[系统] {sender} 正在呼叫你", align="center")
+                self.root.after(0, lambda: messagebox.showinfo("来电", f"{sender} 正在呼叫你"))
+            elif msg_type == "accept":
+                self.call_peer = sender
+                self.target_user = sender
+                self.call_state = "TALKING"
+                self.safe_log(f"[系统] {sender} 已接听，通话建立", align="center")
+            elif msg_type == "hangup":
+                self.safe_log(f"[系统] {sender} 已挂断", align="center")
+                self._reset_call_state()
             else:
                 self.safe_log(f"[系统] 收到未知消息类型: {msg_type}", align="center")
 
+    # 当缓冲区积累到足够数据后，播放实时语音。
     def playback_thread(self):
         while self.running:
             try:
-                if len(self.buffer) >= JITTER_START_THRESHOLD and self.play_stream is not None:
+                if (
+                    self.call_state == "TALKING"
+                    and len(self.buffer) >= JITTER_START_THRESHOLD
+                    and self.play_stream is not None
+                ):
                     self.play_stream.write(self.buffer.popleft())
                 else:
                     time.sleep(0.01)
@@ -371,14 +454,25 @@ class MultiFunctionClient:
                     self.safe_log(f"[系统] 播放失败: {e}", align="center")
                 time.sleep(0.05)
 
+    # 刷新窗口顶部显示的简要状态栏。
     def update_status(self):
+        state_map = {
+            "IDLE": "空闲",
+            "CALLING": "呼叫中",
+            "RINGING": "响铃中",
+            "TALKING": "通话中",
+        }
         target = self.target_user or "未选择"
         self.status_label.config(
-            text=f"缓冲区: {len(self.buffer)} | 目标: {target} | 在线: {len(self.online_users)}"
+            text=(
+                f"状态: {state_map.get(self.call_state, self.call_state)} | "
+                f"缓冲区: {len(self.buffer)} | 目标: {target} | 在线: {len(self.online_users)}"
+            )
         )
         if self.running:
             self.root.after(400, self.update_status)
 
+    # 关闭 socket、音频流和窗口，完成资源清理。
     def on_close(self):
         self.running = False
         self.is_recording = False

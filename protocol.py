@@ -6,6 +6,7 @@ import struct
 HEADER_STRUCT = struct.Struct("!I")
 
 
+# 从 socket 中精确读取指定字节数的数据。
 def recvall(sock: socket.socket, size: int) -> bytes:
     data = bytearray()
     while len(data) < size:
@@ -37,6 +38,7 @@ def send_packet(sock, msg_type, sender, data_dict=None, binary_payload=None):
         sock.sendall(payload)
 
 
+# 读取并解析一个完整数据包，返回包头和可选的二进制载荷。
 def recv_packet(sock):
     """
     Receive a packet and return (header_dict, binary_payload).
