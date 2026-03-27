@@ -1,22 +1,16 @@
 import pyaudio
 
-# Network settings
-HOST = "127.0.0.1"
+# 网络配置
+HOST = '10.192.37.159'
 PORT = 8080
+BUFFER_SIZE = 4096
 
-# Audio settings
+# 音频配置
 CHUNK = 1024
 FORMAT = pyaudio.paInt16
-FORMAT_NAME = "paInt16"
 CHANNELS = 1
 RATE = 44100
 
-# Storage paths
+# 存储路径
 RECORD_DIR = "records"
 RECEIVE_DIR = "received"
-SERVER_RECEIVE_DIR = "server_received"
-CONTACTS_FILE = "contacts.json"
-
-# Realtime voice playback tuning
-JITTER_BUFFER_MAXLEN = 50
-JITTER_START_THRESHOLD = 5

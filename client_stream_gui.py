@@ -1,416 +1,168 @@
-import collections
-import os
-import socket
-import threading
-import time
+# client_stream_gui.py
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, simpledialog
-
+from tkinter import scrolledtext, messagebox
+import threading
+import socket
 import pyaudio
-
-from audio_manager import AudioManager
-from config import (
-    CHANNELS,
-    CHUNK,
-    CONTACTS_FILE,
-    FORMAT,
-    HOST,
-    JITTER_BUFFER_MAXLEN,
-    JITTER_START_THRESHOLD,
-    PORT,
-    RATE,
-    RECEIVE_DIR,
-)
-from protocol import recv_packet, send_packet
-
-
-class MultiFunctionClient:
+import collections
+import time
+from protocol import send_packet, recv_packet
+from config import HOST, PORT, CHUNK, RATE, CHANNELS
+from contact_manager import ContactManager
+class RealTimeChatClient:
     def __init__(self, root):
         self.root = root
-        self.root.title("综合音频终端")
-        self.root.geometry("760x700")
-
-        self.sock = None
-        self.running = True
+        self.root.title("VoIP 实时语音通信系统 (实验任务 6-8)")
+        self.root.geometry("500x600")
+        self.state = "IDLE"
+        self.cm = ContactManager()
+        # 核心参数：抖动缓冲区（Jitter Buffer）
+        # 任务 8 优化：增加缓冲区可以减少卡顿，但会增加延迟
+        self.buffer = collections.deque(maxlen=50) 
         self.is_recording = False
-        self.buffer = collections.deque(maxlen=JITTER_BUFFER_MAXLEN)
-        self.audio_manager = AudioManager()
+        self.my_name = f"User_{int(time.time())%1000}"
 
-        default_name = f"User_{int(time.time()) % 1000}"
-        self.my_name = (simpledialog.askstring("用户名", "请输入用户名：", initialvalue=default_name, parent=root) or default_name).strip()
-        self.target_user = None
-        self.online_users = []
-        self.contacts = self.load_contacts()
-        self.user_index_map = {}
-        self.play_stream = None
-        self.stream_pa = None
+        # UI 建设
+        self.chat_display = scrolledtext.ScrolledText(root, state='disabled', height=20)
+        self.chat_display.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
-        self._build_ui()
-        self.refresh_user_listbox()
-        self.connect_server()
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.root.after(400, self.update_status)
+        self.btn_mic = tk.Button(root, text="🎤 开启实时对讲", font=("微软雅黑", 12), 
+                                 command=self.toggle_mic, bg="#eeeeee")
+        self.btn_mic.pack(pady=20)
 
-    def _build_ui(self):
-        self.status_label = tk.Label(
-            self.root,
-            text="缓冲区: 0 | 目标: 未选择 | 在线: 0",
-            fg="blue",
-            font=("Arial", 10, "bold"),
-        )
-        self.status_label.pack(pady=6)
+        self.status_label = tk.Label(root, text="网络状态: 未连接", fg="red")
+        self.status_label.pack()
+        tk.Button(root, text="📞 呼叫", command=self.call_user).pack(pady=5)
+        tk.Button(root, text="✅ 接听", command=self.accept_call).pack(pady=5)
+        tk.Button(root, text="❌ 挂断", command=self.hangup).pack(pady=5)
+        
+        self.name_entry = tk.Entry(root)
+        self.name_entry.pack(pady=5)
 
-        body = tk.Frame(self.root)
-        body.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.addr_entry = tk.Entry(root)
+        self.addr_entry.pack(pady=5)
 
-        sidebar = tk.Frame(body)
-        sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
-
-        tk.Label(sidebar, text="在线用户 / 联系人").pack(anchor="w")
-        self.user_listbox = tk.Listbox(sidebar, width=26, height=24, bg="#f8f8f8")
-        self.user_listbox.pack(fill=tk.Y, expand=True)
-        self.user_listbox.bind("<<ListboxSelect>>", self.on_user_select)
-        self.user_listbox.bind("<Double-Button-1>", self.on_user_select)
-
-        tk.Button(sidebar, text="刷新目标", command=self.on_user_select).pack(fill=tk.X, pady=(8, 4))
-        tk.Button(sidebar, text="保存联系人", command=self.save_contact).pack(fill=tk.X, pady=4)
-        tk.Button(sidebar, text="添加/改备注", command=self.ui_add_contact).pack(fill=tk.X, pady=4)
-        tk.Button(sidebar, text="删除联系人", command=self.ui_del_contact).pack(fill=tk.X, pady=4)
-
-        main = tk.Frame(body)
-        main.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self.chat_display = scrolledtext.ScrolledText(main, state="disabled", bg="white")
-        self.chat_display.pack(fill=tk.BOTH, expand=True)
-        self.chat_display.tag_configure("self_msg", justify="right", foreground="#0b7f3f", spacing1=4)
-        self.chat_display.tag_configure("other_msg", justify="left", foreground="black", spacing1=4)
-        self.chat_display.tag_configure("system", justify="center", foreground="gray", spacing1=4)
-
-        controls = tk.Frame(self.root)
-        controls.pack(fill=tk.X, padx=10, pady=10)
-
-        self.input_entry = tk.Entry(controls)
-        self.input_entry.pack(fill=tk.X, pady=(0, 8))
-        self.input_entry.bind("<Return>", lambda _: self.send_text())
-
-        button_row = tk.Frame(controls)
-        button_row.pack(fill=tk.X)
-
-        tk.Button(button_row, text="发送文字", command=self.send_text, width=10).pack(side=tk.LEFT, padx=2)
-        tk.Button(button_row, text="发送文件", command=self.send_file, width=10).pack(side=tk.LEFT, padx=2)
-        tk.Button(button_row, text="录音 5 秒发送", command=self.send_offline_voice, width=14).pack(side=tk.LEFT, padx=2)
-
-        self.btn_mic = tk.Button(
-            controls,
-            text="开启实时通话",
-            command=self.toggle_realtime_mic,
-            bg="#eeeeee",
-            font=("Arial", 10, "bold"),
-        )
-        self.btn_mic.pack(fill=tk.X, pady=8)
-
-    def log(self, msg, align="left"):
-        self.chat_display.config(state="normal")
-        tag = "self_msg" if align == "right" else ("system" if align == "center" else "other_msg")
-        self.chat_display.insert(tk.END, msg + "\n", tag)
-        self.chat_display.config(state="disabled")
-        self.chat_display.see(tk.END)
-
-    def safe_log(self, msg, align="left"):
-        self.root.after(0, lambda: self.log(msg, align))
-
-    def load_contacts(self):
-        if os.path.exists(CONTACTS_FILE):
-            try:
-                import json
-
-                with open(CONTACTS_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                return {}
-        return {}
-
-    def save_contacts_to_disk(self):
-        import json
-
-        with open(CONTACTS_FILE, "w", encoding="utf-8") as f:
-            json.dump(self.contacts, f, ensure_ascii=False, indent=2)
-
-    def add_contact(self, name, remark="常用联系人"):
-        self.contacts[name] = remark
-        self.save_contacts_to_disk()
-        self.refresh_user_listbox()
-        self.log(f"[系统] 已保存联系人: {name} ({remark})", align="center")
-
-    def delete_contact(self, name):
-        if name in self.contacts:
-            del self.contacts[name]
-            self.save_contacts_to_disk()
-            self.refresh_user_listbox()
-            self.log(f"[系统] 已删除联系人: {name}", align="center")
-
-    def save_contact(self):
-        if not self.target_user:
-            return messagebox.showwarning("提示", "请先选择一个目标用户")
-        remark = self.contacts.get(self.target_user, "常用联系人")
-        self.add_contact(self.target_user, remark)
-
-    def ui_add_contact(self):
-        if not self.target_user:
-            return messagebox.showwarning("提示", "请先在左侧选择一个在线用户")
-        remark = simpledialog.askstring(
-            "添加好友",
-            f"为 {self.target_user} 输入备注：",
-            initialvalue=self.contacts.get(self.target_user, "常用联系人"),
-            parent=self.root,
-        )
-        if remark:
-            self.add_contact(self.target_user, remark.strip())
-
-    def ui_del_contact(self):
-        if not self.target_user:
-            return messagebox.showwarning("提示", "请先选择一个联系人")
-        if messagebox.askyesno("确认", f"确定要删除联系人 {self.target_user} 吗？"):
-            self.delete_contact(self.target_user)
-
-    def refresh_user_listbox(self):
-        self.user_listbox.delete(0, tk.END)
-        self.user_index_map.clear()
-
-        names = sorted(set(self.online_users) | set(self.contacts.keys()))
-        insert_index = 0
-        for username in names:
-            if username == self.my_name:
-                continue
-
-            online = username in self.online_users
-            prefix = "在线" if online else "离线"
-            remark = self.contacts.get(username)
-            label = f"[{prefix}] {username}"
-            if remark:
-                label += f" ({remark})"
-
-            self.user_listbox.insert(tk.END, label)
-            self.user_index_map[insert_index] = username
-            insert_index += 1
-
-    def on_user_select(self, event=None):
-        selection = self.user_listbox.curselection()
-        if not selection:
-            return
-        username = self.user_index_map.get(selection[0])
-        if not username:
-            return
-        self.target_user = username
-        self.log(f"[系统] 当前目标已切换为: {self.target_user}", align="center")
-
-    def require_target(self):
-        if not self.target_user:
-            messagebox.showwarning("提示", "请先选择目标用户")
-            return False
-        return True
-
-    def connect_server(self):
+        tk.Button(root, text="添加联系人", command=self.add_contact).pack(pady=5)
+        # 初始化网络
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.connect((HOST, PORT))
-            send_packet(self.sock, "login", self.my_name)
-
-            self.stream_pa = pyaudio.PyAudio()
-            self.play_stream = self.stream_pa.open(
-                format=FORMAT,
-                channels=CHANNELS,
-                rate=RATE,
-                output=True,
-                frames_per_buffer=CHUNK,
-            )
-
-            self.log(f"[系统] 欢迎登录，当前用户: {self.my_name}", align="center")
+            self.status_label.config(text=f"网络状态: 已连接 (RTT 优化开启)", fg="green")
+            
+            # 开启接收线程和播放线程
             threading.Thread(target=self.receive_thread, daemon=True).start()
             threading.Thread(target=self.playback_thread, daemon=True).start()
         except Exception as e:
-            self.running = False
-            messagebox.showerror("错误", f"连接失败: {e}")
+            messagebox.showerror("连接失败", f"无法连接到服务器: {e}")
 
-    def send_text(self):
-        if not self.require_target():
-            return
+    def log(self, msg):
+        self.chat_display.config(state='normal')
+        self.chat_display.insert(tk.END, msg + "\n")
+        self.chat_display.config(state='disabled')
+        self.chat_display.see(tk.END)
 
-        msg = self.input_entry.get().strip()
-        if not msg:
-            return
-
-        send_packet(self.sock, "text", self.my_name, {"target": self.target_user, "msg": msg})
-        self.log(f"我 -> {self.target_user}: {msg}", align="right")
-        self.input_entry.delete(0, tk.END)
-
-    def send_file(self):
-        if not self.require_target():
-            return
-
-        fpath = filedialog.askopenfilename(
-            title="选择要发送的文件",
-            filetypes=[("所有文件", "*.*")],
-        )
-        if not fpath:
-            return
-
-        try:
-            with open(fpath, "rb") as f:
-                file_data = f.read()
-            filename = os.path.basename(fpath)
-            send_packet(
-                self.sock,
-                "file",
-                self.my_name,
-                {"target": self.target_user, "filename": filename},
-                file_data,
-            )
-            self.log(f"我 -> {self.target_user}: [文件] {filename}", align="right")
-        except Exception as e:
-            messagebox.showerror("错误", f"文件发送失败: {e}")
-
-    def send_offline_voice(self):
-        if not self.require_target():
-            return
-
-        def task():
-            try:
-                self.safe_log("[系统] 正在录制 5 秒语音...", align="center")
-                data = self.audio_manager.record_audio(5)
-                send_packet(self.sock, "audio", self.my_name, {"target": self.target_user}, data)
-                self.safe_log(f"我 -> {self.target_user}: [语音消息]", align="right")
-            except Exception as e:
-                self.safe_log(f"[系统] 录音发送失败: {e}", align="center")
-
-        threading.Thread(target=task, daemon=True).start()
-
-    def toggle_realtime_mic(self):
-        if not self.require_target():
-            return
-
+    def toggle_mic(self):
         self.is_recording = not self.is_recording
         if self.is_recording:
-            self.btn_mic.config(text="停止实时通话", bg="#ff9999")
-            threading.Thread(target=self.record_stream_thread, daemon=True).start()
-            self.log(f"[系统] 已开始向 {self.target_user} 发送实时语音", align="center")
+            self.btn_mic.config(text="🛑 停止对讲 (通话中...)", bg="#ff9999")
+            threading.Thread(target=self.record_thread, daemon=True).start()
         else:
-            self.btn_mic.config(text="开启实时通话", bg="#eeeeee")
-            self.log("[系统] 已停止实时语音", align="center")
+            self.btn_mic.config(text="🎤 开启实时对讲", bg="#eeeeee")
 
-    def record_stream_thread(self):
+    def record_thread(self):
+        """任务 6 & 8: 流式录音逻辑"""
         pa = pyaudio.PyAudio()
-        stream = None
-        try:
-            stream = pa.open(
-                format=FORMAT,
-                channels=CHANNELS,
-                rate=RATE,
-                input=True,
-                frames_per_buffer=CHUNK,
-            )
-            while self.running and self.is_recording:
+        stream = pa.open(format=pyaudio.paInt16, channels=CHANNELS, rate=RATE, 
+                         input=True, frames_per_buffer=CHUNK)
+        self.log("[系统] 麦克风已开启...")
+        while self.is_recording:
+            if self.state !="TALKING":
+                time.sleep(0.1)
+                continue
+            try:
                 data = stream.read(CHUNK, exception_on_overflow=False)
-                send_packet(self.sock, "stream", self.my_name, {"target": self.target_user}, data)
-        except Exception as e:
-            if self.running:
-                self.safe_log(f"[系统] 实时语音发送失败: {e}", align="center")
-        finally:
-            self.is_recording = False
-            if stream is not None:
-                try:
-                    stream.stop_stream()
-                    stream.close()
-                except Exception:
-                    pass
-            pa.terminate()
-            self.root.after(0, lambda: self.btn_mic.config(text="开启实时通话", bg="#eeeeee"))
+                # 实时发送音频碎包
+                send_packet(self.sock, "stream", self.my_name, binary_payload=data)
+            except:
+                break
+        stream.stop_stream()
+        stream.close()
+        pa.terminate()
+        self.log("[系统] 麦克风已关闭。")
 
     def receive_thread(self):
-        while self.running:
+        """任务 7: 实时数据接收与解析"""
+        while True:
             header, payload = recv_packet(self.sock)
             if not header:
-                if self.running:
-                    self.safe_log("[系统] 与服务器连接已断开", align="center")
-                self.running = False
+                self.log("[错误] 与服务器断开连接")
                 break
-
-            msg_type = header.get("type")
-            sender = header.get("sender", "未知用户")
-
-            if msg_type == "user_list":
-                self.online_users = header.get("users", [])
-                self.root.after(0, self.refresh_user_listbox)
-            elif msg_type == "text":
-                self.safe_log(f"{sender}: {header.get('msg', '')}", align="left")
-            elif msg_type == "audio":
-                self.safe_log(f"{sender}: [语音消息]", align="left")
-                threading.Thread(target=self.audio_manager.play_audio, args=(payload,), daemon=True).start()
-            elif msg_type == "stream":
-                if payload:
+            
+            if header['type'] == 'stream':
+                if self.state == "TALKING":
                     self.buffer.append(payload)
-            elif msg_type == "file":
-                filename = header.get("filename", "new_file.bin")
-                os.makedirs(RECEIVE_DIR, exist_ok=True)
-                save_path = os.path.join(RECEIVE_DIR, f"from_{sender}_{filename}")
-                with open(save_path, "wb") as f:
-                    f.write(payload)
-                self.safe_log(f"{sender}: [文件] {filename} 已保存到 {save_path}", align="left")
-            else:
-                self.safe_log(f"[系统] 收到未知消息类型: {msg_type}", align="center")
+                # 收到音频流，丢进 Jitter Buffer
+                self.buffer.append(payload)
+            elif header['type'] == 'text':
+                self.log(f"{header['sender']}: {header.get('msg')}")
+            elif header['type'] == 'call':
+                 self.log(f"[系统] {header['sender']} 正在呼叫你")
+                 self.state = "RINGING"
+
+            elif header['type'] == 'accept':
+                self.log("[系统] 对方已接听")
+                self.state = "TALKING"
+
+            elif header['type'] == 'hangup':
+                self.log("[系统] 对方已挂断")
+                self.state = "IDLE"
 
     def playback_thread(self):
-        while self.running:
-            try:
-                if len(self.buffer) >= JITTER_START_THRESHOLD and self.play_stream is not None:
-                    self.play_stream.write(self.buffer.popleft())
-                else:
-                    time.sleep(0.01)
-            except Exception as e:
-                if self.running:
-                    self.safe_log(f"[系统] 播放失败: {e}", align="center")
-                time.sleep(0.05)
+        """任务 8 核心：带抖动缓冲的播放逻辑"""
+        
+        pa = pyaudio.PyAudio()
+        stream = pa.open(format=pyaudio.paInt16, channels=CHANNELS, rate=RATE, 
+                         output=True, frames_per_buffer=CHUNK)
+        
+        while True:
+            # 只有当缓冲区积攒了足够的数据包（例如 5 个），才开始播放
+            # 这样可以抵消网络传输不稳定的“抖动”
+            if len(self.buffer) > 5:
+                while len(self.buffer) > 0:
+                    data = self.buffer.popleft()
+                    stream.write(data)
+            else:
+                time.sleep(0.01) # 缓冲不足时稍作等待
+    
+    def call_user(self):
+     if self.state != "IDLE":
+         self.log("[系统] 当前状态无法呼叫")
+         return
 
-    def update_status(self):
-        target = self.target_user or "未选择"
-        self.status_label.config(
-            text=f"缓冲区: {len(self.buffer)} | 目标: {target} | 在线: {len(self.online_users)}"
-        )
-        if self.running:
-            self.root.after(400, self.update_status)
+     send_packet(self.sock, "call", self.my_name)
+     self.state = "CALLING"
+     self.log("[系统] 正在呼叫...")
 
-    def on_close(self):
-        self.running = False
-        self.is_recording = False
+    def accept_call(self):
+     if self.state != "RINGING":
+         return
 
-        try:
-            if self.sock:
-                self.sock.close()
-        except Exception:
-            pass
+     send_packet(self.sock, "accept", self.my_name)
+     self.state = "TALKING"
+     self.log("[系统] 已接听")
 
-        try:
-            if self.play_stream is not None:
-                self.play_stream.stop_stream()
-                self.play_stream.close()
-        except Exception:
-            pass
-
-        try:
-            if self.stream_pa is not None:
-                self.stream_pa.terminate()
-        except Exception:
-            pass
-
-        try:
-            self.audio_manager.pa.terminate()
-        except Exception:
-            pass
-
-        self.root.destroy()
+    def hangup(self):
+     send_packet(self.sock, "hangup", self.my_name)
+     self.state = "IDLE"
+     self.log("[系统] 已挂断")
 
 
+    def add_contact(self):
+        name = self.name_entry.get()
+        addr = self.addr_entry.get()
+        self.cm.add(name, addr)
+        self.log(f"[电话本] 已添加 {name}")
 if __name__ == "__main__":
     root = tk.Tk()
-    client = MultiFunctionClient(root)
+    client = RealTimeChatClient(root)
     root.mainloop()
