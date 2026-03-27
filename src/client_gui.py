@@ -10,7 +10,7 @@ from config import HOST, PORT
 class ChatClient:
     def __init__(self, root):
         self.root = root
-        self.root.title("Python 网络音频聊天室")
+        self.root.title("网络音频聊天室")
         self.audio = AudioManager()
         self.name = f"User_{int(time.time()) % 1000}"
         
