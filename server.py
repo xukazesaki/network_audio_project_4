@@ -1,12 +1,22 @@
+import os
 import socket
 import threading
+import time
+import wave
 
-from config import HOST, PORT
+from audio_manager import AudioManager
+from config import CHANNELS, FORMAT, HOST, PORT, RATE, SERVER_RECEIVE_DIR
 from protocol import recv_packet, send_packet
 
 
 clients = {}  # {username: socket}
 clients_lock = threading.Lock()
+server_running = True
+last_received_audio = None
+
+
+def ensure_server_dirs():
+    os.makedirs(SERVER_RECEIVE_DIR, exist_ok=True)
 
 
 def _safe_send(username, msg_type, sender, data_dict=None, payload=None) -> bool:
@@ -32,6 +42,19 @@ def broadcast_users():
         _safe_send(name, "user_list", "Server", {"users": names})
 
 
+def list_clients():
+    with clients_lock:
+        names = sorted(clients.keys())
+
+    if not names:
+        print("[*] 当前没有在线客户端")
+        return
+
+    print("[*] 当前在线客户端：")
+    for idx, name in enumerate(names, start=1):
+        print(f"    {idx}. {name}")
+
+
 def remove_client(username):
     if not username:
         return
@@ -46,6 +69,58 @@ def remove_client(username):
             pass
         print(f"[-] 用户断开: {username}")
         broadcast_users()
+
+
+def send_text_to_all(text: str):
+    with clients_lock:
+        recipients = list(clients.keys())
+
+    for username in recipients:
+        _safe_send(username, "text", "Server", {"msg": text})
+
+
+def send_text_to_client(target: str, text: str) -> bool:
+    return _safe_send(target, "text", "Server", {"msg": text})
+
+
+def send_audio_to_client(target: str, file_path: str) -> bool:
+    if not os.path.exists(file_path):
+        return False
+
+    try:
+        with open(file_path, "rb") as f:
+            data = f.read()
+    except Exception:
+        return False
+
+    return _safe_send(target, "audio", "Server", {}, data)
+
+
+def save_incoming_audio(sender: str, payload: bytes):
+    global last_received_audio
+
+    if not payload:
+        return
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    filename = f"{sender}_{timestamp}.wav"
+    path = os.path.join(SERVER_RECEIVE_DIR, filename)
+
+    try:
+        audio = AudioManager()
+        sample_width = audio.pa.get_sample_size(FORMAT)
+        audio.pa.terminate()
+    except Exception:
+        sample_width = 2
+
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(CHANNELS)
+        wf.setsampwidth(sample_width)
+        wf.setframerate(RATE)
+        wf.writeframes(payload)
+
+    last_received_audio = path
+    print(f"[AUDIO] 已保存来自 {sender} 的音频: {path}")
 
 
 def handle_client(conn, addr):
@@ -90,10 +165,23 @@ def handle_client(conn, addr):
                 if key not in {"type", "sender", "payload_len"}
             }
 
+            if msg_type == "text":
+                text = header.get("msg", "")
+                print(f"[TEXT] {my_name} -> {target or 'ALL'}: {text}")
+            elif msg_type == "audio":
+                print(f"[AUDIO] {my_name} -> {target or 'ALL'}: {len(payload)} bytes")
+                save_incoming_audio(my_name, payload)
+            elif msg_type == "file":
+                print(f"[FILE] {my_name} -> {target or 'ALL'}: {header.get('filename', 'unknown')}")
+            elif msg_type == "stream":
+                pass
+
             if target:
                 if target == my_name:
                     continue
-                _safe_send(target, msg_type, my_name, extra, payload)
+                ok = _safe_send(target, msg_type, my_name, extra, payload)
+                if not ok and msg_type != "stream":
+                    _safe_send(my_name, "text", "Server", {"msg": f"用户 {target} 不在线或不存在"})
                 continue
 
             with clients_lock:
@@ -110,13 +198,168 @@ def handle_client(conn, addr):
         remove_client(my_name)
 
 
+def print_help():
+    print("\n服务端可用命令：")
+    print("  help                         查看命令")
+    print("  list                         查看在线客户端")
+    print("  all <消息>                   向所有客户端广播文本")
+    print("  to <用户名> <消息>           向指定用户发送文本")
+    print("  sendaudio <用户名> <路径>    向指定用户发送音频文件")
+    print("  playlast                     播放最近收到的音频")
+    print("  playaudio <路径>             播放指定音频文件")
+    print("  quit                         关闭服务器\n")
+
+
+def server_input_loop(server_socket: socket.socket):
+    global server_running
+
+    try:
+        audio = AudioManager()
+    except Exception:
+        audio = None
+
+    print_help()
+
+    while server_running:
+        try:
+            cmd = input("server> ").strip()
+            if not cmd:
+                continue
+
+            if cmd == "help":
+                print_help()
+                continue
+
+            if cmd == "list":
+                list_clients()
+                continue
+
+            if cmd.startswith("all "):
+                text = cmd[4:].strip()
+                if text:
+                    send_text_to_all(text)
+                continue
+
+            if cmd.startswith("to "):
+                parts = cmd.split(" ", 2)
+                if len(parts) < 3:
+                    print("格式错误，应为：to <用户名> <消息>")
+                    continue
+
+                target = parts[1].strip()
+                text = parts[2].strip()
+                ok = send_text_to_client(target, text)
+                if not ok:
+                    print(f"[!] 用户 {target} 不在线或不存在")
+                continue
+
+            if cmd.startswith("sendaudio "):
+                parts = cmd.split(" ", 2)
+                if len(parts) < 3:
+                    print("格式错误，应为：sendaudio <用户名> <音频路径>")
+                    continue
+
+                target = parts[1].strip()
+                file_path = parts[2].strip()
+                ok = send_audio_to_client(target, file_path)
+                if ok:
+                    print(f"[AUDIO] 已发送给 {target}: {file_path}")
+                else:
+                    print("[AUDIO] 发送失败，用户不存在或文件不存在")
+                continue
+
+            if cmd == "playlast":
+                if not last_received_audio:
+                    print("[AUDIO] 当前还没有收到任何音频")
+                    continue
+                if audio is None:
+                    print("[AUDIO] 当前环境无法播放，请先安装 pyaudio")
+                    continue
+
+                try:
+                    audio.play_audio(_read_wave_as_pcm(last_received_audio))
+                    print(f"[AUDIO] 正在播放: {last_received_audio}")
+                except Exception as e:
+                    print(f"[AUDIO] 播放失败: {e}")
+                continue
+
+            if cmd.startswith("playaudio "):
+                file_path = cmd[len("playaudio "):].strip()
+                if not file_path:
+                    print("格式错误，应为：playaudio <路径>")
+                    continue
+                if not os.path.exists(file_path):
+                    print(f"[AUDIO] 文件不存在: {file_path}")
+                    continue
+                if audio is None:
+                    print("[AUDIO] 当前环境无法播放，请先安装 pyaudio")
+                    continue
+
+                try:
+                    audio.play_audio(_read_wave_as_pcm(file_path))
+                    print(f"[AUDIO] 正在播放: {file_path}")
+                except Exception as e:
+                    print(f"[AUDIO] 播放失败: {e}")
+                continue
+
+            if cmd == "quit":
+                print("[*] 正在关闭服务器...")
+                server_running = False
+                send_text_to_all("服务器即将关闭")
+                try:
+                    server_socket.close()
+                except Exception:
+                    pass
+                break
+
+            print("未知命令，输入 help 查看可用命令")
+
+        except EOFError:
+            break
+        except Exception as e:
+            print(f"[!] 服务端输入线程异常: {e}")
+
+    if audio is not None:
+        try:
+            audio.pa.terminate()
+        except Exception:
+            pass
+
+
+def _read_wave_as_pcm(file_path: str) -> bytes:
+    with wave.open(file_path, "rb") as wf:
+        return wf.readframes(wf.getnframes())
+
+
 if __name__ == "__main__":
+    ensure_server_dirs()
+
     server_socket = socket.socket()
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind((HOST, PORT))
     server_socket.listen(10)
     print(f"服务器已启动: {HOST}:{PORT}")
 
-    while True:
-        client_conn, client_addr = server_socket.accept()
-        threading.Thread(target=handle_client, args=(client_conn, client_addr), daemon=True).start()
+    input_thread = threading.Thread(target=server_input_loop, args=(server_socket,), daemon=True)
+    input_thread.start()
+
+    try:
+        while server_running:
+            try:
+                client_conn, client_addr = server_socket.accept()
+            except OSError:
+                break
+            threading.Thread(target=handle_client, args=(client_conn, client_addr), daemon=True).start()
+    finally:
+        with clients_lock:
+            names = list(clients.keys())
+
+        for username in names:
+            remove_client(username)
+
+        try:
+            server_socket.close()
+        except Exception:
+            pass
+
+        print("服务端已关闭")
