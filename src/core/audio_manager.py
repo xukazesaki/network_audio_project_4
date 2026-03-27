@@ -1,7 +1,7 @@
 import pyaudio
 import wave
 import os
-from config import *
+from src.core.config import *
 
 class AudioManager:
     # 创建一个共享的 PyAudio 实例，供录音和播放使用。

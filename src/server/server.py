@@ -4,9 +4,9 @@ import threading
 import time
 import wave
 
-from audio_manager import AudioManager
-from config import CHANNELS, FORMAT, HOST, PORT, RATE, SERVER_RECEIVE_DIR
-from protocol import recv_packet, send_packet
+from src.core.audio_manager import AudioManager
+from src.core.config import CHANNELS, FORMAT, HOST, PORT, RATE, SERVER_RECEIVE_DIR
+from src.core.protocol import recv_packet, send_packet
 
 
 clients = {}  # {username: socket}

@@ -1,6 +1,6 @@
 # audio_streamer.py
 import pyaudio
-from config import CHUNK, FORMAT_NAME, CHANNELS, RATE
+from src.core.config import CHUNK, FORMAT_NAME, CHANNELS, RATE
 
 class AudioEngine:
     # 创建一个用于流式输入输出的 PyAudio 封装。

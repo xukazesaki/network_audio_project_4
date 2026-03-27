@@ -1,7 +1,7 @@
 import json
 import os
 
-from config import CONTACTS_FILE
+from src.core.config import CONTACTS_FILE
 
 
 class ContactManager:

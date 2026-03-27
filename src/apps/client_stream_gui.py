@@ -8,8 +8,8 @@ from tkinter import filedialog, messagebox, scrolledtext, simpledialog
 
 import pyaudio
 
-from audio_manager import AudioManager
-from config import (
+from src.core.audio_manager import AudioManager
+from src.core.config import (
     CHANNELS,
     CHUNK,
     FORMAT,
@@ -20,8 +20,8 @@ from config import (
     RATE,
     RECEIVE_DIR,
 )
-from contact_manager import ContactManager
-from protocol import recv_packet, send_packet
+from src.core.contact_manager import ContactManager
+from src.core.protocol import recv_packet, send_packet
 
 
 class MultiFunctionClient:

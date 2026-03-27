@@ -1,9 +1,9 @@
 import tkinter as tk
 from tkinter import scrolledtext, messagebox
 import threading, socket, time
-from protocol import send_packet, recv_packet
-from audio_manager import AudioManager
-from config import HOST, PORT
+from src.core.protocol import send_packet, recv_packet
+from src.core.audio_manager import AudioManager
+from src.core.config import HOST, PORT
 
 class ChatClient:
     # 初始化轻量级图形客户端并连接服务器。
