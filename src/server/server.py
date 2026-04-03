@@ -16,6 +16,9 @@ server_running = True
 last_received_audio = None
 auth_service = AuthService()
 
+# 新增：维护当前已加入组播会议的用户
+multicast_members = set()
+
 
 # 确保服务端运行前，音频与账户相关的本地目录已经存在。
 def ensure_server_dirs():
@@ -56,6 +59,16 @@ def broadcast_users():
         _safe_send(name, "user_list", "Server", {"users": names})
 
 
+# 新增：广播当前组播成员列表
+def broadcast_multicast_members():
+    with clients_lock:
+        members = sorted(multicast_members)
+        names = sorted(clients.keys())
+
+    for name in names:
+        _safe_send(name, "mcast_user_list", "Server", {"users": members})
+
+
 # 在服务端控制台打印当前在线客户端列表。
 def list_clients():
     with clients_lock:
@@ -77,6 +90,7 @@ def remove_client(username):
 
     with clients_lock:
         conn = clients.pop(username, None)
+        multicast_members.discard(username)
 
     if conn is not None:
         try:
@@ -85,6 +99,7 @@ def remove_client(username):
             pass
         print(f"[-] 用户断开: {username}")
         broadcast_users()
+        broadcast_multicast_members()
 
 
 # 从服务端向所有在线用户发送文本广播。
@@ -185,6 +200,8 @@ def handle_auth_message(conn, msg_type, sender, current_user=None):
         send_direct(conn, "login_ok", "Server", {"username": username, "nickname": user["nickname"]})
         print(f"[AUTH] 用户登录: {username}")
         broadcast_users()
+        broadcast_multicast_members()
+
         return username
 
     return None
@@ -213,6 +230,22 @@ def handle_client(conn, addr):
 
             if not my_name:
                 send_direct(conn, "text", "Server", {"msg": "请先注册或登录"})
+                continue
+
+            # 新增：处理组播成员加入
+            if msg_type == "mcast_join":
+                with clients_lock:
+                    multicast_members.add(my_name)
+                print(f"[MCAST] {my_name} 加入组播会议")
+                broadcast_multicast_members()
+                continue
+
+            # 新增：处理组播成员退出
+            if msg_type == "mcast_leave":
+                with clients_lock:
+                    multicast_members.discard(my_name)
+                print(f"[MCAST] {my_name} 退出组播会议")
+                broadcast_multicast_members()
                 continue
 
             extra = {
