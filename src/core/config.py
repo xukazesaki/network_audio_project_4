@@ -13,7 +13,7 @@ SERVER_RECEIVE_DIR = DATA_DIR / "server_received"
 # Network settings
 HOST = "127.0.0.1"
 PORT = 8080
-
+UDP_PORT = 5007        # 新增：给 UDP 转发用的端口
 # Audio settings
 CHUNK = 1024
 FORMAT = pyaudio.paInt16

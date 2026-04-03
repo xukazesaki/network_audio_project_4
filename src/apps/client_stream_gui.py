@@ -8,6 +8,7 @@ from tkinter import filedialog, messagebox, scrolledtext, simpledialog
 
 import pyaudio
 
+
 from src.core.audio_manager import AudioManager
 from src.core.config import (
     CHANNELS,
@@ -38,6 +39,9 @@ class MultiFunctionClient:
         self.audio_manager = AudioManager()
         self.contact_manager = ContactManager()
 
+        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        threading.Thread(target=self.udp_receive_thread, daemon=True).start()
+        
         default_name = f"User_{int(time.time()) % 1000}"
         entered_name = simpledialog.askstring(
             "用户名",
@@ -373,9 +377,13 @@ class MultiFunctionClient:
                 input=True,
                 frames_per_buffer=CHUNK,
             )
+            from src.core.config import HOST, UDP_PORT 
+            server_address = (HOST, UDP_PORT) # 10.192.42.148, 5007
+            
             while self.running and self.is_recording and self.call_state == "TALKING" and self.call_peer:
                 data = stream.read(CHUNK, exception_on_overflow=False)
-                send_packet(self.sock, "stream", self.my_name, {"target": self.call_peer}, data)
+                #send_packet(self.sock, "stream", self.my_name, {"target": self.call_peer}, data)
+                self.udp_sock.sendto(data, server_address)
         except Exception as e:
             if self.running:
                 self.safe_log(f"[系统] 实时语音发送失败: {e}", align="center")
@@ -502,8 +510,19 @@ class MultiFunctionClient:
             pass
 
         self.root.destroy()
-
-
+    
+    def udp_receive_thread(self):
+    # 绑定一个本地随机端口接收服务器转发回来的音频
+    # 注意：UDP 是无连接的，服务器会根据你发包的来源地址回发
+     while self.running:
+        try:
+            # 接收来自服务器转发的音频原始 PCM 数据
+            data, addr = self.udp_sock.recvfrom(8192)
+            if data and self.call_state == "TALKING":
+                # 将收到的原始数据直接塞入播放缓冲区
+                self.buffer.append(data)
+        except Exception:
+            continue
 if __name__ == "__main__":
     root = tk.Tk()
     client = MultiFunctionClient(root)

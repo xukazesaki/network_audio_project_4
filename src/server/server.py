@@ -131,6 +131,42 @@ def save_incoming_audio(sender: str, payload: bytes):
     last_received_audio = path
     print(f"[AUDIO] 已保存来自 {sender} 的音频: {path}")
 
+# 用于存储所有发送过 UDP 包的客户端地址 (IP, Port)
+udp_clients = set()
+udp_clients_lock = threading.Lock()
+
+def start_udp_audio_relay():
+    """专门负责 UDP 语音包转发的引擎"""
+    from src.core.config import UDP_PORT # 确保 config 里定义了 UDP_PORT = 5007
+    
+    # 创建 UDP Socket
+    relay_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    relay_sock.bind(('0.0.0.0', 5007))  # 监听 5007 端口
+    print(f"[*] [UDP] 语音转发引擎已启动，监听端口: 5007")
+
+    while server_running:
+        try:
+            # 接收音频原始数据包 (UDP 不建立连接，直接收)
+            data, addr = relay_sock.recvfrom(8192) 
+            
+            with udp_clients_lock:
+                # 如果是新地址，加入转发名单
+                if addr not in udp_clients:
+                    udp_clients.add(addr)
+                    print(f"[UDP] 新音频源加入通话: {addr}")
+
+                # 核心逻辑：转发给除了发送者以外的所有人
+                for client_addr in list(udp_clients):
+                    if client_addr != addr:
+                        try:
+                            relay_sock.sendto(data, client_addr)
+                        except Exception:
+                            udp_clients.remove(client_addr)
+        except Exception as e:
+            if server_running:
+                print(f"[!] [UDP] 转发异常: {e}")
+
+
 
 # 处理单个客户端连接，包括登录、收发消息和转发。
 def handle_client(conn, addr):
@@ -356,6 +392,9 @@ if __name__ == "__main__":
     input_thread = threading.Thread(target=server_input_loop, args=(server_socket,), daemon=True)
     input_thread.start()
 
+    # --- 新增：启动 UDP 语音中转线程 ---
+    udp_thread = threading.Thread(target=start_udp_audio_relay, daemon=True)
+    udp_thread.start()
     try:
         while server_running:
             try:
