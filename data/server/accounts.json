@@ -1,0 +1,40 @@
+{
+  "users": {
+    "111": {
+      "username": "111",
+      "nickname": "111",
+      "friends": [],
+      "pending_incoming": [],
+      "pending_outgoing": [],
+      "created_at": "2026-04-03T03:47:38Z",
+      "updated_at": "2026-04-03T03:47:38Z"
+    },
+    "222": {
+      "username": "222",
+      "nickname": "222",
+      "friends": [],
+      "pending_incoming": [],
+      "pending_outgoing": [],
+      "created_at": "2026-04-03T03:48:06Z",
+      "updated_at": "2026-04-03T03:48:06Z"
+    },
+    "333": {
+      "username": "333",
+      "nickname": "333",
+      "friends": [],
+      "pending_incoming": [],
+      "pending_outgoing": [],
+      "created_at": "2026-04-03T03:56:44Z",
+      "updated_at": "2026-04-03T03:56:44Z"
+    },
+    "444": {
+      "username": "444",
+      "nickname": "444",
+      "friends": [],
+      "pending_incoming": [],
+      "pending_outgoing": [],
+      "created_at": "2026-04-03T04:04:02Z",
+      "updated_at": "2026-04-03T04:04:02Z"
+    }
+  }
+}

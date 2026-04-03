@@ -20,12 +20,11 @@ from src.core.config import (
     RATE,
     RECEIVE_DIR,
 )
-from src.core.contact_manager import ContactManager
 from src.core.protocol import recv_packet, send_packet
 
 
 class MultiFunctionClient:
-    # 初始化主客户端窗口、通话状态以及网络和音频组件。
+    # 初始化客户端主窗口、认证状态以及网络和音频组件。
     def __init__(self, root):
         self.root = root
         self.root.title("综合音频终端")
@@ -36,20 +35,11 @@ class MultiFunctionClient:
         self.is_recording = False
         self.buffer = collections.deque(maxlen=JITTER_BUFFER_MAXLEN)
         self.audio_manager = AudioManager()
-        self.contact_manager = ContactManager()
 
-        default_name = f"User_{int(time.time()) % 1000}"
-        entered_name = simpledialog.askstring(
-            "用户名",
-            "请输入用户名：",
-            initialvalue=default_name,
-            parent=root,
-        )
-        self.my_name = (entered_name or default_name).strip() or default_name
-
+        self.my_name = None
         self.target_user = None
         self.online_users = []
-        self.contacts = self.contact_manager.get_all()
+        self.friends = {}
         self.user_index_map = {}
         self.play_stream = None
         self.stream_pa = None
@@ -59,16 +49,21 @@ class MultiFunctionClient:
         self.ringing_from = None
 
         self._build_ui()
+
+        if not self.connect_and_auth():
+            self.running = False
+            self.root.after(0, self.root.destroy)
+            return
+
         self.refresh_user_listbox()
-        self.connect_server()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(400, self.update_status)
 
-    # 创建联系人、聊天区、通话控制和媒体控制的完整界面布局。
+    # 创建在线用户列表、聊天区、通话控制和媒体控制的界面布局。
     def _build_ui(self):
         self.status_label = tk.Label(
             self.root,
-            text="状态: 空闲 | 缓冲区: 0 | 目标: 未选择 | 在线: 0",
+            text="状态: 未登录 | 缓冲区: 0 | 目标: 未选择 | 在线: 0",
             fg="blue",
             font=("Arial", 10, "bold"),
         )
@@ -80,16 +75,24 @@ class MultiFunctionClient:
         sidebar = tk.Frame(body)
         sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
 
-        tk.Label(sidebar, text="在线用户 / 联系人").pack(anchor="w")
+        tk.Label(sidebar, text="在线用户").pack(anchor="w")
         self.user_listbox = tk.Listbox(sidebar, width=28, height=24, bg="#f8f8f8")
         self.user_listbox.pack(fill=tk.Y, expand=True)
         self.user_listbox.bind("<<ListboxSelect>>", self.on_user_select)
         self.user_listbox.bind("<Double-Button-1>", self.on_user_select)
 
-        tk.Button(sidebar, text="设为当前目标", command=self.on_user_select).pack(fill=tk.X, pady=(8, 4))
-        tk.Button(sidebar, text="保存联系人", command=self.save_contact).pack(fill=tk.X, pady=4)
-        tk.Button(sidebar, text="添加/改备注", command=self.ui_add_contact).pack(fill=tk.X, pady=4)
-        tk.Button(sidebar, text="删除联系人", command=self.ui_del_contact).pack(fill=tk.X, pady=4)
+        tk.Button(sidebar, text="设为当前目标", command=self.on_user_select).pack(
+            fill=tk.X, pady=(8, 4)
+        )
+
+        self.friend_placeholder = tk.Label(
+            sidebar,
+            text="好友电话本将切换为服务端数据",
+            fg="gray",
+            justify=tk.LEFT,
+            wraplength=180,
+        )
+        self.friend_placeholder.pack(fill=tk.X, pady=(8, 0))
 
         main = tk.Frame(body)
         main.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -110,9 +113,18 @@ class MultiFunctionClient:
         button_row = tk.Frame(controls)
         button_row.pack(fill=tk.X)
 
-        tk.Button(button_row, text="发送文字", command=self.send_text, width=10).pack(side=tk.LEFT, padx=2)
-        tk.Button(button_row, text="发送文件", command=self.send_file, width=10).pack(side=tk.LEFT, padx=2)
-        tk.Button(button_row, text="录音 5 秒发送", command=self.send_offline_voice, width=14).pack(side=tk.LEFT, padx=2)
+        tk.Button(button_row, text="发送文字", command=self.send_text, width=10).pack(
+            side=tk.LEFT, padx=2
+        )
+        tk.Button(button_row, text="发送文件", command=self.send_file, width=10).pack(
+            side=tk.LEFT, padx=2
+        )
+        tk.Button(
+            button_row,
+            text="录音 5 秒发送",
+            command=self.send_offline_voice,
+            width=14,
+        ).pack(side=tk.LEFT, padx=2)
 
         call_row = tk.Frame(controls)
         call_row.pack(fill=tk.X, pady=(8, 0))
@@ -120,7 +132,6 @@ class MultiFunctionClient:
         tk.Button(call_row, text="接听", command=self.accept_call, width=10).pack(side=tk.LEFT, padx=2)
         tk.Button(call_row, text="挂断", command=self.hangup, width=10).pack(side=tk.LEFT, padx=2)
 
-        # 去掉“开启实时通话”按钮，改为接通后自动开启实时语音
         self.auto_call_label = tk.Label(
             controls,
             text="已启用：接通后自动开始实时语音",
@@ -128,6 +139,196 @@ class MultiFunctionClient:
             font=("Arial", 10, "bold"),
         )
         self.auto_call_label.pack(fill=tk.X, pady=8)
+
+    # 建立连接并完成注册/登录；认证成功后再启动后台线程。
+    def connect_and_auth(self):
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.connect((HOST, PORT))
+        except Exception as e:
+            messagebox.showerror("错误", f"连接服务器失败: {e}")
+            return False
+
+        try:
+            auth_user = self.run_auth_flow()
+            if not auth_user:
+                return False
+
+            self.my_name = auth_user
+            self.stream_pa = pyaudio.PyAudio()
+            self.play_stream = self.stream_pa.open(
+                format=FORMAT,
+                channels=CHANNELS,
+                rate=RATE,
+                output=True,
+                frames_per_buffer=CHUNK,
+            )
+
+            self.log(f"[系统] 欢迎登录，当前用户: {self.my_name}", align="center")
+            threading.Thread(target=self.receive_thread, daemon=True).start()
+            threading.Thread(target=self.playback_thread, daemon=True).start()
+            return True
+        except Exception as e:
+            messagebox.showerror("错误", f"认证失败: {e}")
+            return False
+
+    # 弹出认证操作选择框，明确区分注册、登录和退出。
+    def choose_auth_action(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("登录或注册")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        result = {"action": None}
+
+        tk.Label(
+            dialog,
+            text="请选择接下来的操作",
+            font=("Arial", 11, "bold"),
+            padx=24,
+            pady=16,
+        ).pack()
+
+        button_row = tk.Frame(dialog, padx=16, pady=12)
+        button_row.pack()
+
+        def select(action):
+            result["action"] = action
+            dialog.destroy()
+
+        tk.Button(button_row, text="注册", width=10, command=lambda: select("register")).pack(
+            side=tk.LEFT, padx=6
+        )
+        tk.Button(button_row, text="登录", width=10, command=lambda: select("login")).pack(
+            side=tk.LEFT, padx=6
+        )
+        tk.Button(button_row, text="退出", width=10, command=lambda: select(None)).pack(
+            side=tk.LEFT, padx=6
+        )
+
+        dialog.protocol("WM_DELETE_WINDOW", lambda: select(None))
+        dialog.update_idletasks()
+
+        root_x = self.root.winfo_rootx()
+        root_y = self.root.winfo_rooty()
+        root_w = self.root.winfo_width()
+        root_h = self.root.winfo_height()
+        dlg_w = dialog.winfo_width()
+        dlg_h = dialog.winfo_height()
+        pos_x = root_x + max((root_w - dlg_w) // 2, 0)
+        pos_y = root_y + max((root_h - dlg_h) // 2, 0)
+        dialog.geometry(f"+{pos_x}+{pos_y}")
+
+        self.root.wait_window(dialog)
+        return result["action"]
+
+    # 运行启动时的认证流程；注册成功后返回到认证选择，不自动登录。
+    def run_auth_flow(self):
+        while self.running:
+            action = self.choose_auth_action()
+            if action is None:
+                return None
+
+            username = simpledialog.askstring(
+                "用户名",
+                "请输入用户名：",
+                parent=self.root,
+            )
+            if username is None:
+                continue
+
+            username = username.strip()
+            if not username:
+                messagebox.showwarning("提示", "用户名不能为空")
+                continue
+
+            if action == "register":
+                register_ok = self.try_register(username)
+                if not register_ok:
+                    continue
+                continue
+
+            login_ok = self.try_login(username)
+            if login_ok:
+                return username
+
+        return None
+
+    # 发送注册请求，并根据服务端回包给出提示。
+    def try_register(self, username):
+        send_packet(self.sock, "register", username)
+        header, _ = recv_packet(self.sock)
+        if not header:
+            messagebox.showerror("错误", "注册时与服务器断开连接")
+            return False
+
+        msg_type = header.get("type")
+        if msg_type == "register_ok":
+            messagebox.showinfo("提示", f"注册成功：{username}")
+            self._consume_auth_text_tip()
+            return True
+
+        if msg_type == "register_error":
+            code = header.get("code", "unknown_error")
+            messagebox.showwarning("注册失败", self.format_auth_error(code))
+            self._consume_auth_text_tip()
+            return False
+
+        self._handle_unexpected_auth_packet(header)
+        return False
+
+    # 发送登录请求，并根据服务端回包判断是否进入主界面。
+    def try_login(self, username):
+        send_packet(self.sock, "login", username)
+        header, _ = recv_packet(self.sock)
+        if not header:
+            messagebox.showerror("错误", "登录时与服务器断开连接")
+            return False
+
+        msg_type = header.get("type")
+        if msg_type == "login_ok":
+            return True
+
+        if msg_type == "login_error":
+            code = header.get("code", "unknown_error")
+            messagebox.showwarning("登录失败", self.format_auth_error(code))
+            self._consume_auth_text_tip()
+            return False
+
+        self._handle_unexpected_auth_packet(header)
+        return False
+
+    # 将服务端认证错误码转换为更易理解的中文提示。
+    def format_auth_error(self, code):
+        code_map = {
+            "empty_username": "用户名不能为空。",
+            "username_taken": "该用户名已存在，请换一个用户名。",
+            "user_not_found": "该用户尚未注册，请先注册。",
+            "already_authenticated": "当前客户端已经登录，不能再次登录其他账户。",
+        }
+        return code_map.get(code, f"操作失败：{code}")
+
+    # 吃掉认证失败后服务端附带的 text 提示包，避免进入主线程后重复显示。
+    def _consume_auth_text_tip(self):
+        try:
+            header, _ = recv_packet(self.sock)
+        except Exception:
+            return
+
+        if not header:
+            return
+
+        if header.get("type") != "text":
+            self._handle_unexpected_auth_packet(header)
+
+    # 处理认证阶段收到的非预期回包。
+    def _handle_unexpected_auth_packet(self, header):
+        msg_type = header.get("type", "unknown")
+        if msg_type == "text":
+            messagebox.showinfo("服务器消息", header.get("msg", ""))
+            return
+        messagebox.showwarning("提示", f"收到未预期的认证响应：{msg_type}")
 
     # 向主消息区追加一条带样式的文本。
     def log(self, msg, align="left"):
@@ -141,53 +342,12 @@ class MultiFunctionClient:
     def safe_log(self, msg, align="left"):
         self.root.after(0, lambda: self.log(msg, align))
 
-    # 从联系人管理器刷新内存中的联系人缓存。
-    def refresh_contacts(self):
-        self.contacts = self.contact_manager.get_all()
-
-    # 将当前目标保存为联系人，备注使用已有值或默认值。
-    def save_contact(self):
-        if not self.target_user:
-            return messagebox.showwarning("提示", "请先选择一个目标用户")
-        remark = self.contact_manager.get(self.target_user, "常用联系人")
-        self.contact_manager.add(self.target_user, remark)
-        self.refresh_contacts()
-        self.refresh_user_listbox()
-        self.log(f"[系统] 已保存联系人: {self.target_user} ({remark})", align="center")
-
-    # 弹出输入框，为当前选中用户保存自定义备注。
-    def ui_add_contact(self):
-        if not self.target_user:
-            return messagebox.showwarning("提示", "请先在左侧选择一个在线用户")
-        remark = simpledialog.askstring(
-            "添加好友",
-            f"为 {self.target_user} 输入备注：",
-            initialvalue=self.contact_manager.get(self.target_user, "常用联系人"),
-            parent=self.root,
-        )
-        if remark:
-            self.contact_manager.add(self.target_user, remark.strip())
-            self.refresh_contacts()
-            self.refresh_user_listbox()
-            self.log(f"[系统] 已保存联系人: {self.target_user} ({remark.strip()})", align="center")
-
-    # 在用户确认后删除当前选中的联系人。
-    def ui_del_contact(self):
-        if not self.target_user:
-            return messagebox.showwarning("提示", "请先选择一个联系人")
-        if messagebox.askyesno("确认", f"确定要删除联系人 {self.target_user} 吗？"):
-            self.contact_manager.delete(self.target_user)
-            self.refresh_contacts()
-            self.refresh_user_listbox()
-            self.log(f"[系统] 已删除联系人: {self.target_user}", align="center")
-
-    # 根据在线用户和已保存联系人重建侧边栏列表。
+    # 根据在线用户和预留的好友数据刷新左侧列表。
     def refresh_user_listbox(self):
-        self.refresh_contacts()
         self.user_listbox.delete(0, tk.END)
         self.user_index_map.clear()
 
-        names = sorted(set(self.online_users) | set(self.contacts.keys()))
+        names = sorted(set(self.online_users) | set(self.friends.keys()))
         insert_index = 0
         for username in names:
             if username == self.my_name:
@@ -195,10 +355,7 @@ class MultiFunctionClient:
 
             online = username in self.online_users
             prefix = "在线" if online else "离线"
-            remark = self.contacts.get(username)
             label = f"[{prefix}] {username}"
-            if remark:
-                label += f" ({remark})"
 
             self.user_listbox.insert(tk.END, label)
             self.user_index_map[insert_index] = username
@@ -209,34 +366,13 @@ class MultiFunctionClient:
         selection = self.user_listbox.curselection()
         if not selection:
             return
+
         username = self.user_index_map.get(selection[0])
         if not username:
             return
+
         self.target_user = username
         self.log(f"[系统] 当前目标已切换为: {self.target_user}", align="center")
-
-    # 建立 socket 连接，并启动接收线程和播放线程。
-    def connect_server(self):
-        try:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.connect((HOST, PORT))
-            send_packet(self.sock, "login", self.my_name)
-
-            self.stream_pa = pyaudio.PyAudio()
-            self.play_stream = self.stream_pa.open(
-                format=FORMAT,
-                channels=CHANNELS,
-                rate=RATE,
-                output=True,
-                frames_per_buffer=CHUNK,
-            )
-
-            self.log(f"[系统] 欢迎登录，当前用户: {self.my_name}", align="center")
-            threading.Thread(target=self.receive_thread, daemon=True).start()
-            threading.Thread(target=self.playback_thread, daemon=True).start()
-        except Exception as e:
-            self.running = False
-            messagebox.showerror("错误", f"连接失败: {e}")
 
     # 为必须先选择目标用户的操作做前置检查。
     def require_target(self):
@@ -273,6 +409,7 @@ class MultiFunctionClient:
         try:
             with open(fpath, "rb") as f:
                 file_data = f.read()
+
             filename = os.path.basename(fpath)
             send_packet(
                 self.sock,
@@ -314,7 +451,7 @@ class MultiFunctionClient:
         send_packet(self.sock, "call", self.my_name, {"target": self.target_user})
         self.log(f"[系统] 正在呼叫 {self.target_user}...", align="center")
 
-    # 自动开启实时语音发送。
+    # 在通话建立后自动开启实时语音发送。
     def start_realtime_voice(self):
         if self.call_state != "TALKING":
             return
@@ -327,7 +464,7 @@ class MultiFunctionClient:
         threading.Thread(target=self.record_stream_thread, daemon=True).start()
         self.log(f"[系统] 已开始与 {self.call_peer} 实时通话", align="center")
 
-    # 接听当前正在响铃的来电，并自动开始实时语音。
+    # 接听当前正在响铃的来电，并开始实时语音。
     def accept_call(self):
         if self.call_state != "RINGING" or not self.ringing_from:
             messagebox.showwarning("提示", "当前没有待接听来电")
@@ -342,7 +479,7 @@ class MultiFunctionClient:
         self.ringing_from = None
         self.start_realtime_voice()
 
-    # 挂断当前正在进行或等待中的通话。
+    # 挂断当前进行中或等待中的通话。
     def hangup(self):
         peer = self.call_peer or self.ringing_from or self.target_user
         if not peer:
@@ -434,6 +571,8 @@ class MultiFunctionClient:
             elif msg_type == "hangup":
                 self.safe_log(f"[系统] {sender} 已挂断", align="center")
                 self._reset_call_state()
+            elif msg_type in {"register_ok", "register_error", "login_ok", "login_error"}:
+                continue
             else:
                 self.safe_log(f"[系统] 收到未知消息类型: {msg_type}", align="center")
 
@@ -463,9 +602,10 @@ class MultiFunctionClient:
             "TALKING": "通话中",
         }
         target = self.target_user or "未选择"
+        login_state = self.my_name or "未登录"
         self.status_label.config(
             text=(
-                f"状态: {state_map.get(self.call_state, self.call_state)} | "
+                f"状态: {state_map.get(self.call_state, login_state)} | "
                 f"缓冲区: {len(self.buffer)} | 目标: {target} | 在线: {len(self.online_users)}"
             )
         )

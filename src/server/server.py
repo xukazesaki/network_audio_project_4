@@ -7,20 +7,22 @@ import wave
 from src.core.audio_manager import AudioManager
 from src.core.config import CHANNELS, FORMAT, HOST, PORT, RATE, SERVER_RECEIVE_DIR
 from src.core.protocol import recv_packet, send_packet
+from src.server.auth_service import AuthService
 
 
 clients = {}  # {username: socket}
 clients_lock = threading.Lock()
 server_running = True
 last_received_audio = None
+auth_service = AuthService()
 
 
-# 确保服务端运行前所需的本地存储目录已经存在。
+# 确保服务端运行前，音频与账户相关的本地目录已经存在。
 def ensure_server_dirs():
     os.makedirs(SERVER_RECEIVE_DIR, exist_ok=True)
 
 
-# 安全地向指定用户发送一个数据包，发送失败时自动清理连接。
+# 安全地向某个在线用户发送数据包；失败时自动移除断开的连接。
 def _safe_send(username, msg_type, sender, data_dict=None, payload=None) -> bool:
     with clients_lock:
         conn = clients.get(username)
@@ -36,7 +38,16 @@ def _safe_send(username, msg_type, sender, data_dict=None, payload=None) -> bool
         return False
 
 
-# 将当前在线用户名单广播给所有已连接客户端。
+# 直接向某个 socket 发送数据，常用于登录/注册阶段的回包。
+def send_direct(conn, msg_type, sender, data_dict=None, payload=None) -> bool:
+    try:
+        send_packet(conn, msg_type, sender, data_dict, payload)
+        return True
+    except Exception:
+        return False
+
+
+# 将当前在线用户名单广播给所有已登录客户端。
 def broadcast_users():
     with clients_lock:
         names = sorted(clients.keys())
@@ -45,7 +56,7 @@ def broadcast_users():
         _safe_send(name, "user_list", "Server", {"users": names})
 
 
-# 为服务端操作者打印一个带编号的在线用户列表。
+# 在服务端控制台打印当前在线客户端列表。
 def list_clients():
     with clients_lock:
         names = sorted(clients.keys())
@@ -59,7 +70,7 @@ def list_clients():
         print(f"    {idx}. {name}")
 
 
-    # 移除一个已断开的客户端，并刷新全局在线列表。
+# 移除一个已断开的客户端，并刷新全局在线列表。
 def remove_client(username):
     if not username:
         return
@@ -76,7 +87,7 @@ def remove_client(username):
         broadcast_users()
 
 
-# 从服务端向所有在线用户发送文本消息。
+# 从服务端向所有在线用户发送文本广播。
 def send_text_to_all(text: str):
     with clients_lock:
         recipients = list(clients.keys())
@@ -104,7 +115,7 @@ def send_audio_to_client(target: str, file_path: str) -> bool:
     return _safe_send(target, "audio", "Server", {}, data)
 
 
-# 保存最近一次收到的离线音频，便于之后回放。
+# 保存最近一次收到的离线音频，方便服务端回放。
 def save_incoming_audio(sender: str, payload: bytes):
     global last_received_audio
 
@@ -132,7 +143,54 @@ def save_incoming_audio(sender: str, payload: bytes):
     print(f"[AUDIO] 已保存来自 {sender} 的音频: {path}")
 
 
-# 处理单个客户端连接，包括登录、收发消息和转发。
+# 处理注册与登录请求，并向客户端返回对应的认证结果。
+def handle_auth_message(conn, msg_type, sender, current_user=None):
+    requested_name = (sender or "").strip()
+
+    if current_user:
+        send_direct(conn, f"{msg_type}_error", "Server", {"code": "already_authenticated", "username": current_user})
+        send_direct(conn, "text", "Server", {"msg": f"当前连接已经登录为 {current_user}，不能再次认证"})
+        return None
+
+    if msg_type == "register":
+        ok, code, user = auth_service.register(requested_name)
+        if not ok:
+            send_direct(conn, "register_error", "Server", {"code": code, "username": requested_name})
+            send_direct(conn, "text", "Server", {"msg": f"注册失败: {code}"})
+            return None
+
+        username = user["username"]
+        send_direct(conn, "register_ok", "Server", {"username": username, "nickname": user["nickname"]})
+        send_direct(conn, "text", "Server", {"msg": f"注册成功: {username}"})
+        print(f"[AUTH] 用户注册: {username}")
+        return None
+
+    if msg_type == "login":
+        ok, code, user = auth_service.login(requested_name)
+        if not ok:
+            send_direct(conn, "login_error", "Server", {"code": code, "username": requested_name})
+            send_direct(conn, "text", "Server", {"msg": f"登录失败: {code}"})
+            return None
+
+        username = user["username"]
+        with clients_lock:
+            old_conn = clients.get(username)
+            if old_conn is not None and old_conn is not conn:
+                try:
+                    old_conn.close()
+                except Exception:
+                    pass
+            clients[username] = conn
+
+        send_direct(conn, "login_ok", "Server", {"username": username, "nickname": user["nickname"]})
+        print(f"[AUTH] 用户登录: {username}")
+        broadcast_users()
+        return username
+
+    return None
+
+
+# 处理单个客户端连接，包括认证、消息收发与转发逻辑。
 def handle_client(conn, addr):
     my_name = None
     print(f"[+] 新连接: {addr}")
@@ -147,26 +205,14 @@ def handle_client(conn, addr):
             sender = header.get("sender")
             target = header.get("target")
 
-            if msg_type == "login":
-                requested_name = (sender or "").strip()
-                if not requested_name:
-                    continue
-
-                with clients_lock:
-                    old_conn = clients.get(requested_name)
-                    if old_conn is not None and old_conn is not conn:
-                        try:
-                            old_conn.close()
-                        except Exception:
-                            pass
-                    clients[requested_name] = conn
-
-                my_name = requested_name
-                print(f"[+] 用户登录: {my_name}")
-                broadcast_users()
+            if msg_type in {"register", "login"}:
+                auth_name = handle_auth_message(conn, msg_type, sender, my_name)
+                if auth_name:
+                    my_name = auth_name
                 continue
 
             if not my_name:
+                send_direct(conn, "text", "Server", {"msg": "请先注册或登录"})
                 continue
 
             extra = {
@@ -338,7 +384,7 @@ def server_input_loop(server_socket: socket.socket):
             pass
 
 
-# 读取 wav 文件内容并返回原始 PCM 数据，供服务端播放。
+# 读取 wav 文件内容并返回原始 PCM 数据，用于服务端播放。
 def _read_wave_as_pcm(file_path: str) -> bytes:
     with wave.open(file_path, "rb") as wf:
         return wf.readframes(wf.getnframes())
