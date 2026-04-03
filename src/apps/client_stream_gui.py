@@ -29,7 +29,7 @@ class MultiFunctionClient:
     def __init__(self, root):
         self.root = root
         self.root.title("综合音频终端")
-        self.root.geometry("780x760")
+        self.root.geometry("900x820")
 
         self.sock = None
         self.running = True
@@ -120,14 +120,14 @@ class MultiFunctionClient:
         tk.Button(call_row, text="接听", command=self.accept_call, width=10).pack(side=tk.LEFT, padx=2)
         tk.Button(call_row, text="挂断", command=self.hangup, width=10).pack(side=tk.LEFT, padx=2)
 
-        self.btn_mic = tk.Button(
+        # 去掉“开启实时通话”按钮，改为接通后自动开启实时语音
+        self.auto_call_label = tk.Label(
             controls,
-            text="开启实时通话",
-            command=self.toggle_realtime_mic,
-            bg="#eeeeee",
+            text="已启用：接通后自动开始实时语音",
+            fg="green",
             font=("Arial", 10, "bold"),
         )
-        self.btn_mic.pack(fill=tk.X, pady=8)
+        self.auto_call_label.pack(fill=tk.X, pady=8)
 
     # 向主消息区追加一条带样式的文本。
     def log(self, msg, align="left"):
@@ -314,7 +314,20 @@ class MultiFunctionClient:
         send_packet(self.sock, "call", self.my_name, {"target": self.target_user})
         self.log(f"[系统] 正在呼叫 {self.target_user}...", align="center")
 
-    # 接听当前正在响铃的来电。
+    # 自动开启实时语音发送。
+    def start_realtime_voice(self):
+        if self.call_state != "TALKING":
+            return
+        if self.is_recording:
+            return
+        if not self.call_peer:
+            return
+
+        self.is_recording = True
+        threading.Thread(target=self.record_stream_thread, daemon=True).start()
+        self.log(f"[系统] 已开始与 {self.call_peer} 实时通话", align="center")
+
+    # 接听当前正在响铃的来电，并自动开始实时语音。
     def accept_call(self):
         if self.call_state != "RINGING" or not self.ringing_from:
             messagebox.showwarning("提示", "当前没有待接听来电")
@@ -325,7 +338,9 @@ class MultiFunctionClient:
         self.call_state = "TALKING"
         send_packet(self.sock, "accept", self.my_name, {"target": self.ringing_from})
         self.log(f"[系统] 已接听 {self.ringing_from}", align="center")
+
         self.ringing_from = None
+        self.start_realtime_voice()
 
     # 挂断当前正在进行或等待中的通话。
     def hangup(self):
@@ -344,22 +359,7 @@ class MultiFunctionClient:
         self.call_peer = None
         self.ringing_from = None
         self.is_recording = False
-        self.root.after(0, lambda: self.btn_mic.config(text="开启实时通话", bg="#eeeeee"))
-
-    # 在通话进行中开启或停止实时麦克风流发送。
-    def toggle_realtime_mic(self):
-        if self.call_state != "TALKING":
-            messagebox.showwarning("提示", "请先建立通话，再开启实时语音")
-            return
-
-        self.is_recording = not self.is_recording
-        if self.is_recording:
-            self.btn_mic.config(text="停止实时通话", bg="#ff9999")
-            threading.Thread(target=self.record_stream_thread, daemon=True).start()
-            self.log(f"[系统] 已开始与 {self.call_peer} 实时通话", align="center")
-        else:
-            self.btn_mic.config(text="开启实时通话", bg="#eeeeee")
-            self.log("[系统] 已停止实时语音", align="center")
+        self.buffer.clear()
 
     # 持续采集麦克风数据块，并实时发送给通话对端。
     def record_stream_thread(self):
@@ -388,7 +388,6 @@ class MultiFunctionClient:
                 except Exception:
                     pass
             pa.terminate()
-            self.root.after(0, lambda: self.btn_mic.config(text="开启实时通话", bg="#eeeeee"))
 
     # 持续接收服务端数据包，并按消息类型分发处理。
     def receive_thread(self):
@@ -431,6 +430,7 @@ class MultiFunctionClient:
                 self.target_user = sender
                 self.call_state = "TALKING"
                 self.safe_log(f"[系统] {sender} 已接听，通话建立", align="center")
+                self.start_realtime_voice()
             elif msg_type == "hangup":
                 self.safe_log(f"[系统] {sender} 已挂断", align="center")
                 self._reset_call_state()
