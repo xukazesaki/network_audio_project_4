@@ -32,7 +32,7 @@ class MultiFunctionClient:
     def __init__(self, root):
         self.root = root
         self.root.title("综合音频终端（支持IP组播）")
-        self.root.geometry("980x860")
+        self.root.geometry("980x900")
 
         self.sock = None
         self.running = True
@@ -67,7 +67,6 @@ class MultiFunctionClient:
         self.play_stream = None
         self.stream_pa = None
 
-        # 原有一对一呼叫状态
         self.call_state = "IDLE"
         self.call_peer = None
         self.ringing_from = None
@@ -95,10 +94,15 @@ class MultiFunctionClient:
         sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
 
         tk.Label(sidebar, text="在线用户 / 联系人").pack(anchor="w")
-        self.user_listbox = tk.Listbox(sidebar, width=28, height=24, bg="#f8f8f8")
-        self.user_listbox.pack(fill=tk.Y, expand=True)
+        self.user_listbox = tk.Listbox(sidebar, width=28, height=18, bg="#f8f8f8")
+        self.user_listbox.pack(fill=tk.X, pady=(0, 8))
         self.user_listbox.bind("<<ListboxSelect>>", self.on_user_select)
         self.user_listbox.bind("<Double-Button-1>", self.on_user_select)
+
+        # 新增：组播成员列表
+        tk.Label(sidebar, text="组播成员").pack(anchor="w", pady=(10, 0))
+        self.mcast_listbox = tk.Listbox(sidebar, width=28, height=8, bg="#eef7ff")
+        self.mcast_listbox.pack(fill=tk.X, pady=(0, 8))
 
         tk.Button(sidebar, text="设为当前目标", command=self.on_user_select).pack(fill=tk.X, pady=(8, 4))
         tk.Button(sidebar, text="保存联系人", command=self.save_contact).pack(fill=tk.X, pady=4)
@@ -127,7 +131,6 @@ class MultiFunctionClient:
         tk.Button(button_row, text="发送文件", command=self.send_file, width=10).pack(side=tk.LEFT, padx=2)
         tk.Button(button_row, text="录音 5 秒发送", command=self.send_offline_voice, width=14).pack(side=tk.LEFT, padx=2)
 
-        # 原有一对一通话
         call_row = tk.Frame(controls)
         call_row.pack(fill=tk.X, pady=(8, 0))
         tk.Label(call_row, text="一对一通话：", fg="black", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=(0, 6))
@@ -135,8 +138,6 @@ class MultiFunctionClient:
         tk.Button(call_row, text="接听", command=self.accept_call, width=10).pack(side=tk.LEFT, padx=2)
         tk.Button(call_row, text="挂断", command=self.hangup, width=10).pack(side=tk.LEFT, padx=2)
 
-
-        # 新增组播会议控制
         mcast_row = tk.Frame(controls)
         mcast_row.pack(fill=tk.X, pady=(8, 0))
         tk.Label(
@@ -150,6 +151,12 @@ class MultiFunctionClient:
         tk.Button(mcast_row, text="开始发言", command=self.start_multicast_talk, width=10).pack(side=tk.LEFT, padx=2)
         tk.Button(mcast_row, text="停止发言", command=self.stop_multicast_talk, width=10).pack(side=tk.LEFT, padx=2)
 
+        tk.Label(
+            controls,
+            text="说明：加入同一组播地址的所有成员，都能同时说、同时听；组播成员列表由TCP服务器同步",
+            fg="darkblue",
+            font=("Arial", 10),
+        ).pack(fill=tk.X, pady=6)
 
     # 向主消息区追加一条带样式的文本。
     def log(self, msg, align="left"):
@@ -225,6 +232,15 @@ class MultiFunctionClient:
             self.user_listbox.insert(tk.END, label)
             self.user_index_map[insert_index] = username
             insert_index += 1
+
+    # 新增：刷新组播成员列表
+    def update_mcast_listbox(self, users):
+        self.mcast_listbox.delete(0, tk.END)
+        for u in users:
+            if u == self.my_name:
+                self.mcast_listbox.insert(tk.END, f"{u}（我）")
+            else:
+                self.mcast_listbox.insert(tk.END, u)
 
     # 根据列表选中项更新当前聊天或通话目标。
     def on_user_select(self, event=None):
@@ -425,6 +441,9 @@ class MultiFunctionClient:
             self.multicast_speaking = False
             self.multicast_buffer.clear()
 
+            # 新增：通知服务器同步组播成员列表
+            send_packet(self.sock, "mcast_join", self.my_name)
+
             threading.Thread(target=self.multicast_receive_thread, daemon=True).start()
             self.log(
                 f"[系统] 已加入组播会议 {MCAST_GRP}:{MCAST_PORT}，现在可以开始多人通话",
@@ -445,6 +464,13 @@ class MultiFunctionClient:
         if not self.multicast_joined:
             return
 
+        # 新增：通知服务器同步组播成员列表
+        if self.sock:
+            try:
+                send_packet(self.sock, "mcast_leave", self.my_name)
+            except Exception:
+                pass
+
         self.multicast_speaking = False
         self.multicast_joined = False
         self.multicast_buffer.clear()
@@ -457,6 +483,7 @@ class MultiFunctionClient:
             self.multicast_sender.close()
             self.multicast_sender = None
 
+        self.update_mcast_listbox([])
         self.log("[系统] 已退出组播会议", align="center")
 
     def start_multicast_talk(self):
@@ -534,6 +561,12 @@ class MultiFunctionClient:
             if msg_type == "user_list":
                 self.online_users = header.get("users", [])
                 self.root.after(0, self.refresh_user_listbox)
+
+            # 新增：接收服务器广播的组播成员列表
+            elif msg_type == "mcast_user_list":
+                users = header.get("users", [])
+                self.root.after(0, self.update_mcast_listbox, users)
+
             elif msg_type == "text":
                 self.safe_log(f"{sender}: {header.get('msg', '')}", align="left")
             elif msg_type == "audio":
@@ -572,7 +605,6 @@ class MultiFunctionClient:
             try:
                 played = False
 
-                # 优先播放一对一实时通话
                 if (
                     self.call_state == "TALKING"
                     and len(self.buffer) >= JITTER_START_THRESHOLD
@@ -581,7 +613,6 @@ class MultiFunctionClient:
                     self.play_stream.write(self.buffer.popleft())
                     played = True
 
-                # 其次播放组播会议语音
                 elif (
                     self.multicast_joined
                     and len(self.multicast_buffer) >= JITTER_START_THRESHOLD

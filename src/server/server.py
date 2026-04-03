@@ -14,6 +14,9 @@ clients_lock = threading.Lock()
 server_running = True
 last_received_audio = None
 
+# 新增：维护当前已加入组播会议的用户
+multicast_members = set()
+
 
 # 确保服务端运行前所需的本地存储目录已经存在。
 def ensure_server_dirs():
@@ -45,6 +48,16 @@ def broadcast_users():
         _safe_send(name, "user_list", "Server", {"users": names})
 
 
+# 新增：广播当前组播成员列表
+def broadcast_multicast_members():
+    with clients_lock:
+        members = sorted(multicast_members)
+        names = sorted(clients.keys())
+
+    for name in names:
+        _safe_send(name, "mcast_user_list", "Server", {"users": members})
+
+
 # 为服务端操作者打印一个带编号的在线用户列表。
 def list_clients():
     with clients_lock:
@@ -59,13 +72,14 @@ def list_clients():
         print(f"    {idx}. {name}")
 
 
-    # 移除一个已断开的客户端，并刷新全局在线列表。
+# 移除一个已断开的客户端，并刷新全局在线列表。
 def remove_client(username):
     if not username:
         return
 
     with clients_lock:
         conn = clients.pop(username, None)
+        multicast_members.discard(username)
 
     if conn is not None:
         try:
@@ -74,6 +88,7 @@ def remove_client(username):
             pass
         print(f"[-] 用户断开: {username}")
         broadcast_users()
+        broadcast_multicast_members()
 
 
 # 从服务端向所有在线用户发送文本消息。
@@ -164,9 +179,26 @@ def handle_client(conn, addr):
                 my_name = requested_name
                 print(f"[+] 用户登录: {my_name}")
                 broadcast_users()
+                broadcast_multicast_members()
                 continue
 
             if not my_name:
+                continue
+
+            # 新增：处理组播成员加入
+            if msg_type == "mcast_join":
+                with clients_lock:
+                    multicast_members.add(my_name)
+                print(f"[MCAST] {my_name} 加入组播会议")
+                broadcast_multicast_members()
+                continue
+
+            # 新增：处理组播成员退出
+            if msg_type == "mcast_leave":
+                with clients_lock:
+                    multicast_members.discard(my_name)
+                print(f"[MCAST] {my_name} 退出组播会议")
+                broadcast_multicast_members()
                 continue
 
             extra = {
