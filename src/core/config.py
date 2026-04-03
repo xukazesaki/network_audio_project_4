@@ -10,7 +10,7 @@ RECORD_DIR = DATA_DIR / "recorded"
 RECEIVE_DIR = DATA_DIR / "received"
 SERVER_RECEIVE_DIR = DATA_DIR / "server_received"
 
-# Network settings
+# TCP network settings (原有服务器通信)
 HOST = "127.0.0.1"
 PORT = 8080
 
@@ -28,3 +28,12 @@ SAVED_CONTACTS_FILE = CONTACTS_DIR / "saved_contacts.txt"
 # Realtime voice playback tuning
 JITTER_BUFFER_MAXLEN = 50
 JITTER_START_THRESHOLD = 5
+
+# Multicast settings (新增)
+# 224.0.0.0 ~ 239.255.255.255 为组播地址范围
+# 这里选一个实验室/局域网内可用的自定义组播地址
+MCAST_GRP = "239.255.10.10"
+MCAST_PORT = 5007
+MCAST_TTL = 2
+MCAST_LOOPBACK = False
+MCAST_BUFFER_SIZE = 4096

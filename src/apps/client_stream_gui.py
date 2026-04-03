@@ -16,11 +16,14 @@ from src.core.config import (
     HOST,
     JITTER_BUFFER_MAXLEN,
     JITTER_START_THRESHOLD,
+    MCAST_GRP,
+    MCAST_PORT,
     PORT,
     RATE,
     RECEIVE_DIR,
 )
 from src.core.contact_manager import ContactManager
+from src.core.multicast_audio import MulticastReceiver, MulticastSender
 from src.core.protocol import recv_packet, send_packet
 
 
@@ -28,13 +31,23 @@ class MultiFunctionClient:
     # 初始化主客户端窗口、通话状态以及网络和音频组件。
     def __init__(self, root):
         self.root = root
-        self.root.title("综合音频终端")
-        self.root.geometry("900x820")
+        self.root.title("综合音频终端（支持IP组播）")
+        self.root.geometry("980x860")
 
         self.sock = None
         self.running = True
+
+        # 原有一对一实时通话状态
         self.is_recording = False
         self.buffer = collections.deque(maxlen=JITTER_BUFFER_MAXLEN)
+
+        # 新增组播通话状态
+        self.multicast_joined = False
+        self.multicast_speaking = False
+        self.multicast_buffer = collections.deque(maxlen=JITTER_BUFFER_MAXLEN)
+        self.multicast_sender = None
+        self.multicast_receiver = None
+
         self.audio_manager = AudioManager()
         self.contact_manager = ContactManager()
 
@@ -54,6 +67,7 @@ class MultiFunctionClient:
         self.play_stream = None
         self.stream_pa = None
 
+        # 原有一对一呼叫状态
         self.call_state = "IDLE"
         self.call_peer = None
         self.ringing_from = None
@@ -68,7 +82,7 @@ class MultiFunctionClient:
     def _build_ui(self):
         self.status_label = tk.Label(
             self.root,
-            text="状态: 空闲 | 缓冲区: 0 | 目标: 未选择 | 在线: 0",
+            text="状态: 空闲 | 一对一缓冲区: 0 | 组播缓冲区: 0 | 目标: 未选择 | 在线: 0 | 组播: 未加入",
             fg="blue",
             font=("Arial", 10, "bold"),
         )
@@ -109,25 +123,33 @@ class MultiFunctionClient:
 
         button_row = tk.Frame(controls)
         button_row.pack(fill=tk.X)
-
         tk.Button(button_row, text="发送文字", command=self.send_text, width=10).pack(side=tk.LEFT, padx=2)
         tk.Button(button_row, text="发送文件", command=self.send_file, width=10).pack(side=tk.LEFT, padx=2)
         tk.Button(button_row, text="录音 5 秒发送", command=self.send_offline_voice, width=14).pack(side=tk.LEFT, padx=2)
 
+        # 原有一对一通话
         call_row = tk.Frame(controls)
         call_row.pack(fill=tk.X, pady=(8, 0))
+        tk.Label(call_row, text="一对一通话：", fg="black", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=(0, 6))
         tk.Button(call_row, text="呼叫", command=self.call_user, width=10).pack(side=tk.LEFT, padx=2)
         tk.Button(call_row, text="接听", command=self.accept_call, width=10).pack(side=tk.LEFT, padx=2)
         tk.Button(call_row, text="挂断", command=self.hangup, width=10).pack(side=tk.LEFT, padx=2)
 
-        # 去掉“开启实时通话”按钮，改为接通后自动开启实时语音
-        self.auto_call_label = tk.Label(
-            controls,
-            text="已启用：接通后自动开始实时语音",
-            fg="green",
+
+        # 新增组播会议控制
+        mcast_row = tk.Frame(controls)
+        mcast_row.pack(fill=tk.X, pady=(8, 0))
+        tk.Label(
+            mcast_row,
+            text=f"组播会议（{MCAST_GRP}:{MCAST_PORT}）：",
+            fg="darkblue",
             font=("Arial", 10, "bold"),
-        )
-        self.auto_call_label.pack(fill=tk.X, pady=8)
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(mcast_row, text="加入组播", command=self.join_multicast, width=10).pack(side=tk.LEFT, padx=2)
+        tk.Button(mcast_row, text="退出组播", command=self.leave_multicast, width=10).pack(side=tk.LEFT, padx=2)
+        tk.Button(mcast_row, text="开始发言", command=self.start_multicast_talk, width=10).pack(side=tk.LEFT, padx=2)
+        tk.Button(mcast_row, text="停止发言", command=self.stop_multicast_talk, width=10).pack(side=tk.LEFT, padx=2)
+
 
     # 向主消息区追加一条带样式的文本。
     def log(self, msg, align="left"):
@@ -215,7 +237,7 @@ class MultiFunctionClient:
         self.target_user = username
         self.log(f"[系统] 当前目标已切换为: {self.target_user}", align="center")
 
-    # 建立 socket 连接，并启动接收线程和播放线程。
+    # 建立 TCP socket 连接，并启动接收线程和播放线程。
     def connect_server(self):
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -301,7 +323,10 @@ class MultiFunctionClient:
 
         threading.Thread(target=task, daemon=True).start()
 
-    # 向当前选中的目标用户发起呼叫请求。
+    # =========================
+    # 原有一对一呼叫功能
+    # =========================
+
     def call_user(self):
         if not self.require_target():
             return
@@ -314,7 +339,6 @@ class MultiFunctionClient:
         send_packet(self.sock, "call", self.my_name, {"target": self.target_user})
         self.log(f"[系统] 正在呼叫 {self.target_user}...", align="center")
 
-    # 自动开启实时语音发送。
     def start_realtime_voice(self):
         if self.call_state != "TALKING":
             return
@@ -325,9 +349,8 @@ class MultiFunctionClient:
 
         self.is_recording = True
         threading.Thread(target=self.record_stream_thread, daemon=True).start()
-        self.log(f"[系统] 已开始与 {self.call_peer} 实时通话", align="center")
+        self.log(f"[系统] 已开始与 {self.call_peer} 一对一实时通话", align="center")
 
-    # 接听当前正在响铃的来电，并自动开始实时语音。
     def accept_call(self):
         if self.call_state != "RINGING" or not self.ringing_from:
             messagebox.showwarning("提示", "当前没有待接听来电")
@@ -342,7 +365,6 @@ class MultiFunctionClient:
         self.ringing_from = None
         self.start_realtime_voice()
 
-    # 挂断当前正在进行或等待中的通话。
     def hangup(self):
         peer = self.call_peer or self.ringing_from or self.target_user
         if not peer:
@@ -353,7 +375,6 @@ class MultiFunctionClient:
         self._reset_call_state()
         self.log("[系统] 已挂断", align="center")
 
-    # 将所有通话相关状态重置为空闲状态。
     def _reset_call_state(self):
         self.call_state = "IDLE"
         self.call_peer = None
@@ -361,7 +382,6 @@ class MultiFunctionClient:
         self.is_recording = False
         self.buffer.clear()
 
-    # 持续采集麦克风数据块，并实时发送给通话对端。
     def record_stream_thread(self):
         pa = pyaudio.PyAudio()
         stream = None
@@ -378,7 +398,7 @@ class MultiFunctionClient:
                 send_packet(self.sock, "stream", self.my_name, {"target": self.call_peer}, data)
         except Exception as e:
             if self.running:
-                self.safe_log(f"[系统] 实时语音发送失败: {e}", align="center")
+                self.safe_log(f"[系统] 一对一实时语音发送失败: {e}", align="center")
         finally:
             self.is_recording = False
             if stream is not None:
@@ -389,7 +409,116 @@ class MultiFunctionClient:
                     pass
             pa.terminate()
 
-    # 持续接收服务端数据包，并按消息类型分发处理。
+    # =========================
+    # 新增组播会议功能
+    # =========================
+
+    def join_multicast(self):
+        if self.multicast_joined:
+            messagebox.showinfo("提示", "你已经加入组播会议")
+            return
+
+        try:
+            self.multicast_receiver = MulticastReceiver()
+            self.multicast_sender = MulticastSender()
+            self.multicast_joined = True
+            self.multicast_speaking = False
+            self.multicast_buffer.clear()
+
+            threading.Thread(target=self.multicast_receive_thread, daemon=True).start()
+            self.log(
+                f"[系统] 已加入组播会议 {MCAST_GRP}:{MCAST_PORT}，现在可以开始多人通话",
+                align="center",
+            )
+        except Exception as e:
+            self.multicast_joined = False
+            self.multicast_speaking = False
+            if self.multicast_receiver:
+                self.multicast_receiver.close()
+                self.multicast_receiver = None
+            if self.multicast_sender:
+                self.multicast_sender.close()
+                self.multicast_sender = None
+            messagebox.showerror("错误", f"加入组播失败: {e}")
+
+    def leave_multicast(self):
+        if not self.multicast_joined:
+            return
+
+        self.multicast_speaking = False
+        self.multicast_joined = False
+        self.multicast_buffer.clear()
+
+        if self.multicast_receiver is not None:
+            self.multicast_receiver.close()
+            self.multicast_receiver = None
+
+        if self.multicast_sender is not None:
+            self.multicast_sender.close()
+            self.multicast_sender = None
+
+        self.log("[系统] 已退出组播会议", align="center")
+
+    def start_multicast_talk(self):
+        if not self.multicast_joined:
+            return messagebox.showwarning("提示", "请先加入组播会议")
+        if self.multicast_speaking:
+            return messagebox.showinfo("提示", "当前已经处于发言状态")
+
+        self.multicast_speaking = True
+        threading.Thread(target=self.multicast_record_thread, daemon=True).start()
+        self.log("[系统] 已开始组播发言，组内所有成员都可以听到你", align="center")
+
+    def stop_multicast_talk(self):
+        if not self.multicast_speaking:
+            return
+        self.multicast_speaking = False
+        self.log("[系统] 已停止组播发言", align="center")
+
+    def multicast_record_thread(self):
+        pa = pyaudio.PyAudio()
+        stream = None
+        try:
+            stream = pa.open(
+                format=FORMAT,
+                channels=CHANNELS,
+                rate=RATE,
+                input=True,
+                frames_per_buffer=CHUNK,
+            )
+            while self.running and self.multicast_joined and self.multicast_speaking and self.multicast_sender:
+                data = stream.read(CHUNK, exception_on_overflow=False)
+                self.multicast_sender.send(data)
+        except Exception as e:
+            if self.running:
+                self.safe_log(f"[系统] 组播发言失败: {e}", align="center")
+        finally:
+            self.multicast_speaking = False
+            if stream is not None:
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except Exception:
+                    pass
+            pa.terminate()
+
+    def multicast_receive_thread(self):
+        while self.running and self.multicast_joined and self.multicast_receiver is not None:
+            try:
+                data, addr = self.multicast_receiver.recv()
+                if not self.running or not self.multicast_joined:
+                    break
+                if data:
+                    self.multicast_buffer.append(data)
+            except Exception as e:
+                if self.running and self.multicast_joined:
+                    self.safe_log(f"[系统] 接收组播语音失败: {e}", align="center")
+                time.sleep(0.05)
+
+    # =========================
+    # TCP 收包线程
+    # =========================
+
     def receive_thread(self):
         while self.running:
             header, payload = recv_packet(self.sock)
@@ -429,7 +558,7 @@ class MultiFunctionClient:
                 self.call_peer = sender
                 self.target_user = sender
                 self.call_state = "TALKING"
-                self.safe_log(f"[系统] {sender} 已接听，通话建立", align="center")
+                self.safe_log(f"[系统] {sender} 已接听，一对一通话建立", align="center")
                 self.start_realtime_voice()
             elif msg_type == "hangup":
                 self.safe_log(f"[系统] {sender} 已挂断", align="center")
@@ -437,18 +566,33 @@ class MultiFunctionClient:
             else:
                 self.safe_log(f"[系统] 收到未知消息类型: {msg_type}", align="center")
 
-    # 当缓冲区积累到足够数据后，播放实时语音。
+    # 播放线程：同时支持一对一实时语音与组播语音
     def playback_thread(self):
         while self.running:
             try:
+                played = False
+
+                # 优先播放一对一实时通话
                 if (
                     self.call_state == "TALKING"
                     and len(self.buffer) >= JITTER_START_THRESHOLD
                     and self.play_stream is not None
                 ):
                     self.play_stream.write(self.buffer.popleft())
-                else:
+                    played = True
+
+                # 其次播放组播会议语音
+                elif (
+                    self.multicast_joined
+                    and len(self.multicast_buffer) >= JITTER_START_THRESHOLD
+                    and self.play_stream is not None
+                ):
+                    self.play_stream.write(self.multicast_buffer.popleft())
+                    played = True
+
+                if not played:
                     time.sleep(0.01)
+
             except Exception as e:
                 if self.running:
                     self.safe_log(f"[系统] 播放失败: {e}", align="center")
@@ -460,13 +604,20 @@ class MultiFunctionClient:
             "IDLE": "空闲",
             "CALLING": "呼叫中",
             "RINGING": "响铃中",
-            "TALKING": "通话中",
+            "TALKING": "一对一通话中",
         }
         target = self.target_user or "未选择"
+        multicast_state = "已加入" if self.multicast_joined else "未加入"
+        if self.multicast_joined and self.multicast_speaking:
+            multicast_state += "/发言中"
+
         self.status_label.config(
             text=(
                 f"状态: {state_map.get(self.call_state, self.call_state)} | "
-                f"缓冲区: {len(self.buffer)} | 目标: {target} | 在线: {len(self.online_users)}"
+                f"一对一缓冲区: {len(self.buffer)} | "
+                f"组播缓冲区: {len(self.multicast_buffer)} | "
+                f"目标: {target} | 在线: {len(self.online_users)} | "
+                f"组播: {multicast_state}"
             )
         )
         if self.running:
@@ -476,6 +627,9 @@ class MultiFunctionClient:
     def on_close(self):
         self.running = False
         self.is_recording = False
+        self.multicast_speaking = False
+
+        self.leave_multicast()
 
         try:
             if self.sock:
