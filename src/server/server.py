@@ -171,6 +171,7 @@ def handle_client(conn, addr):
                     old_conn = clients.get(requested_name)
                     if old_conn is not None and old_conn is not conn:
                         try:
+                            send_packet(old_conn, "text", "Server", {"msg": "你的账号在其他地方登录，当前连接已断开"})
                             old_conn.close()
                         except Exception:
                             pass

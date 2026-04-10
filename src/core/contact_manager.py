@@ -22,6 +22,7 @@ class ContactManager:
 
     # 将当前联系人数据保存到磁盘。
     def save(self):
+        os.makedirs(os.path.dirname(self.filename), exist_ok=True)
         with open(self.filename, "w", encoding="utf-8") as f:
             json.dump(self.contacts, f, ensure_ascii=False, indent=2)
 
