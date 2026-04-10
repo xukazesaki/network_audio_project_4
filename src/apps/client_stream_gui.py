@@ -527,7 +527,7 @@ class MultiFunctionClient:
 
     # 挂断当前进行中或等待中的通话。
     def hangup(self):
-        peer = self.call_peer or self.ringing_from or self.target_user
+        peer = self.call_peer or self.ringing_from
         if not peer:
             messagebox.showwarning("提示", "当前没有可挂断的通话")
             return
@@ -728,10 +728,17 @@ class MultiFunctionClient:
                     f.write(payload)
                 self.safe_log(f"{sender}: [文件] {filename} 已保存到 {save_path}", align="left")
             elif msg_type == "call":
-                self.ringing_from = sender
-                self.call_state = "RINGING"
-                self.safe_log(f"[系统] {sender} 正在呼叫你", align="center")
-                self.root.after(0, lambda: messagebox.showinfo("来电", f"{sender} 正在呼叫你"))
+                if self.call_state in ("CALLING", "TALKING"):
+                    try:
+                        send_packet(self.sock, "hangup", self.my_name, {"target": sender})
+                    except Exception:
+                        pass
+                    self.safe_log(f"[系统] {sender} 来电，忙线已自动拒绝", align="center")
+                else:
+                    self.ringing_from = sender
+                    self.call_state = "RINGING"
+                    self.safe_log(f"[系统] {sender} 正在呼叫你", align="center")
+                    self.root.after(0, lambda s=sender: messagebox.showinfo("来电", f"{s} 正在呼叫你"))
             elif msg_type == "accept":
                 self.call_peer = sender
                 self.target_user = sender
