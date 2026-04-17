@@ -8,6 +8,7 @@ from tkinter import filedialog, messagebox, scrolledtext, simpledialog
 
 import pyaudio
 
+import time
 from src.core.audio_manager import AudioManager
 from src.core.config import (
     CHANNELS,
@@ -411,7 +412,9 @@ class MultiFunctionClient:
             )
             while self.running and self.is_recording and self.call_state == "TALKING" and self.call_peer:
                 data = stream.read(CHUNK, exception_on_overflow=False)
-                send_packet(self.sock, "stream", self.my_name, {"target": self.call_peer}, data)
+                
+                send_time = time.time()
+                send_packet(self.sock, "stream", self.my_name, {"target": self.call_peer,"send_time":send_time}, data)
         except Exception as e:
             if self.running:
                 self.safe_log(f"[系统] 一对一实时语音发送失败: {e}", align="center")
@@ -572,9 +575,41 @@ class MultiFunctionClient:
             elif msg_type == "audio":
                 self.safe_log(f"{sender}: [语音消息]", align="left")
                 threading.Thread(target=self.audio_manager.play_audio, args=(payload,), daemon=True).start()
+            
             elif msg_type == "stream":
                 if payload and self.call_state == "TALKING":
-                    self.buffer.append(payload)
+                   send_time = header.get("send_time", None)
+                   recv_time = time.time()
+
+                   if send_time:
+                        delay = (recv_time - send_time) * 1000  # 转成 ms
+
+                        # 打印到终端（最重要）
+                        print(f"[延迟] {sender} -> 我: {delay:.2f} ms")
+
+                        # 可选：显示到GUI
+                        #self.safe_log(f"[延迟] {delay:.2f} ms", align="center")
+
+                        # 记录数据（后面做统计用）
+                        if not hasattr(self, "delay_list"):
+                              self.delay_list = []
+                        self.delay_list.append(delay)
+
+                        # 每10个包统计一次
+                        if len(self.delay_list) >= 10:
+                            avg_delay = sum(self.delay_list) / len(self.delay_list)
+                            #print(f"[统计] 平均延迟: {avg_delay:.2f} ms")
+                            #self.safe_log(f"[统计] 平均延迟: {avg_delay:.2f} ms", align="center")
+                            self.delay_list.clear()
+
+                    # 原本播放逻辑
+                   self.buffer.append(payload)
+           
+           
+           
+           # elif msg_type == "stream":
+               # if payload and self.call_state == "TALKING":
+                    #self.buffer.append(payload)
             elif msg_type == "file":
                 filename = header.get("filename", "new_file.bin")
                 os.makedirs(RECEIVE_DIR, exist_ok=True)
