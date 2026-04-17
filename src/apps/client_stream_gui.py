@@ -68,7 +68,8 @@ class MultiFunctionClient:
         self.call_state = "IDLE"
         self.call_peer = None
         self.ringing_from = None
-
+        self.chat_history = {}        # {session: [(msg, tag)]}
+        self.current_session = "default"
         self._build_ui()
 
         if not self.connect_and_auth():
@@ -375,11 +376,33 @@ class MultiFunctionClient:
 
     # 向主消息区追加一条带样式的文本。
     def log(self, msg, align="left"):
-        self.chat_display.config(state="normal")
         tag = "self_msg" if align == "right" else ("system" if align == "center" else "other_msg")
-        self.chat_display.insert(tk.END, msg + "\n", tag)
+
+        session = self.current_session or "default"
+
+        if session not in self.chat_history:
+            self.chat_history[session] = []
+        self.chat_history[session].append((msg, tag))
+
+        if session == self.current_session:
+            self.chat_display.config(state="normal")
+            self.chat_display.insert(tk.END, msg + "\n", tag)
+            self.chat_display.config(state="disabled")
+            self.chat_display.see(tk.END)
+
+    def load_chat_history(self):
+        self.chat_display.config(state="normal")
+        self.chat_display.delete(1.0, tk.END)
+
+        session = self.current_session or "default"
+        history = self.chat_history.get(session, [])
+
+        for msg, tag in history:
+            self.chat_display.insert(tk.END, msg + "\n", tag)
+
         self.chat_display.config(state="disabled")
         self.chat_display.see(tk.END)
+
 
     # 让后台线程安全地向界面追加日志。
     def safe_log(self, msg, align="left"):
@@ -424,9 +447,10 @@ class MultiFunctionClient:
             return
 
         self.target_user = username
+        self.current_session = username   # ⭐ 切换会话
+        self.load_chat_history() 
+
         self.log(f"[系统] 当前目标已切换为: {self.target_user}", align="center")
-
-
     # 为必须先选择目标用户的操作做前置检查。
     def require_target(self):
         if not self.target_user:
@@ -642,6 +666,10 @@ class MultiFunctionClient:
                 f"[系统] 已加入组播会议 {MCAST_GRP}:{MCAST_PORT}，现在可以开始多人通话",
                 align="center",
             )
+            self.current_session = "group"
+            self.load_chat_history()
+
+
         except Exception as e:
             self.multicast_joined = False
             self.multicast_speaking = False
