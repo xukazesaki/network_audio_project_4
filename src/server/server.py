@@ -1,11 +1,12 @@
 import os
+import select
 import socket
 import threading
 import time
 import wave
 
 from src.core.audio_manager import AudioManager
-from src.core.config import CHANNELS, FORMAT, HOST, PORT, RATE, SERVER_RECEIVE_DIR
+from src.core.config import CHANNELS, CHUNK, FORMAT, HOST, PORT, RATE, SERVER_RECEIVE_DIR, UDP_PORT
 from src.core.protocol import recv_packet, send_packet
 from src.server.auth_service import AuthService
 
@@ -15,9 +16,13 @@ clients_lock = threading.Lock()
 server_running = True
 last_received_audio = None
 auth_service = AuthService()
+UDP_REGISTER_PACKET = b"__udp_register__"
+EXPECTED_UDP_AUDIO_BYTES = CHUNK * 2
 
 # 新增：维护当前已加入组播会议的用户
 multicast_members = set()
+udp_clients = set()
+udp_clients_lock = threading.Lock()
 
 
 # 确保服务端运行前，音频与账户相关的本地目录已经存在。
@@ -159,6 +164,61 @@ def save_incoming_audio(sender: str, payload: bytes):
 
 
 # 处理注册与登录请求，并向客户端返回对应的认证结果。
+def start_udp_audio_relay():
+    try:
+        relay_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        relay_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        relay_sock.bind(("0.0.0.0", UDP_PORT))
+        relay_sock.setblocking(False)
+    except OSError as e:
+        print(f"[!] [UDP] relay failed to start on port {UDP_PORT}: {e}")
+        return
+
+    print(f"[*] [UDP] relay started on port: {UDP_PORT}")
+
+    try:
+        while server_running:
+            ready, _, _ = select.select([relay_sock], [], [], 0.5)
+            if not ready:
+                continue
+
+            try:
+                data, addr = relay_sock.recvfrom(8192)
+            except BlockingIOError:
+                continue
+
+            if not data:
+                continue
+
+            with udp_clients_lock:
+                if addr not in udp_clients:
+                    udp_clients.add(addr)
+                    print(f"[UDP] new audio source: {addr}")
+                recipients = [client_addr for client_addr in udp_clients if client_addr != addr]
+
+            if data == UDP_REGISTER_PACKET:
+                continue
+
+            if len(data) != EXPECTED_UDP_AUDIO_BYTES:
+                continue
+
+            stale_clients = []
+            for client_addr in recipients:
+                try:
+                    relay_sock.sendto(data, client_addr)
+                except Exception:
+                    stale_clients.append(client_addr)
+
+            if stale_clients:
+                with udp_clients_lock:
+                    for client_addr in stale_clients:
+                        udp_clients.discard(client_addr)
+    finally:
+        with udp_clients_lock:
+            udp_clients.clear()
+        relay_sock.close()
+
+
 def handle_auth_message(conn, msg_type, sender, current_user=None):
     requested_name = (sender or "").strip()
 
@@ -432,6 +492,9 @@ if __name__ == "__main__":
     server_socket.bind((HOST, PORT))
     server_socket.listen(10)
     print(f"服务器已启动: {HOST}:{PORT}")
+
+    udp_thread = threading.Thread(target=start_udp_audio_relay, daemon=True)
+    udp_thread.start()
 
     input_thread = threading.Thread(target=server_input_loop, args=(server_socket,), daemon=True)
     input_thread.start()

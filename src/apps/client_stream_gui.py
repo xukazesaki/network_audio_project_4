@@ -21,11 +21,14 @@ from src.core.config import (
     PORT,
     RATE,
     RECEIVE_DIR,
+    UDP_PORT,
 )
 
 
 from src.core.multicast_audio import MulticastReceiver, MulticastSender
 from src.core.protocol import recv_packet, send_packet
+
+UDP_REGISTER_PACKET = b"__udp_register__"
 
 
 class MultiFunctionClient:
@@ -36,6 +39,9 @@ class MultiFunctionClient:
         self.root.geometry("980x900")
 
         self.sock = None
+        self.udp_sock = None
+        self.udp_server_addr = (HOST, UDP_PORT)
+        self.expected_udp_bytes = CHUNK * 2
         self.running = True
 
         # 原有一对一实时通话状态
@@ -188,6 +194,8 @@ class MultiFunctionClient:
                 return False
 
             self.my_name = auth_user
+            self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp_sock.settimeout(0.5)
             self.stream_pa = pyaudio.PyAudio()
             self.play_stream = self.stream_pa.open(
                 format=FORMAT,
@@ -198,7 +206,9 @@ class MultiFunctionClient:
             )
 
             self.log(f"[系统] 欢迎登录，当前用户: {self.my_name}", align="center")
+            self.ensure_udp_registration()
             threading.Thread(target=self.receive_thread, daemon=True).start()
+            threading.Thread(target=self.udp_receive_thread, daemon=True).start()
             threading.Thread(target=self.playback_thread, daemon=True).start()
             return True
         except Exception as e:
@@ -492,6 +502,7 @@ class MultiFunctionClient:
             messagebox.showwarning("提示", "当前已有通话流程，请先挂断")
             return
 
+        self.ensure_udp_registration()
         self.call_state = "CALLING"
         self.call_peer = self.target_user
         send_packet(self.sock, "call", self.my_name, {"target": self.target_user})
@@ -506,6 +517,8 @@ class MultiFunctionClient:
         if not self.call_peer:
             return
 
+        self.ensure_udp_registration()
+        self.buffer.clear()
         self.is_recording = True
         threading.Thread(target=self.record_stream_thread, daemon=True).start()
         self.log(f"[系统] 已开始与 {self.call_peer} 一对一实时通话", align="center")
@@ -543,6 +556,15 @@ class MultiFunctionClient:
         self.is_recording = False
         self.buffer.clear()
 
+    def ensure_udp_registration(self):
+        if self.udp_sock is None:
+            return
+
+        try:
+            self.udp_sock.sendto(UDP_REGISTER_PACKET, self.udp_server_addr)
+        except Exception:
+            pass
+
     def record_stream_thread(self):
         pa = pyaudio.PyAudio()
         stream = None
@@ -556,7 +578,8 @@ class MultiFunctionClient:
             )
             while self.running and self.is_recording and self.call_state == "TALKING" and self.call_peer:
                 data = stream.read(CHUNK, exception_on_overflow=False)
-                send_packet(self.sock, "stream", self.my_name, {"target": self.call_peer}, data)
+                if self.udp_sock is not None:
+                    self.udp_sock.sendto(data, self.udp_server_addr)
         except Exception as e:
             if self.running:
                 self.safe_log(f"[系统] 一对一实时语音发送失败: {e}", align="center")
@@ -569,6 +592,31 @@ class MultiFunctionClient:
                 except Exception:
                     pass
             pa.terminate()
+
+    def udp_receive_thread(self):
+        while self.running and self.udp_sock is not None:
+            try:
+                data, _ = self.udp_sock.recvfrom(8192)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            except Exception as e:
+                if self.running:
+                    self.safe_log(f"[system] UDP audio receive failed: {e}", align="center")
+                time.sleep(0.05)
+                continue
+
+            if self.call_state != "TALKING" or not self.call_peer:
+                continue
+
+            if not data:
+                continue
+
+            if len(data) != self.expected_udp_bytes:
+                continue
+
+            self.buffer.append(data)
 
     # =========================
     # 新增组播会议功能
@@ -743,6 +791,7 @@ class MultiFunctionClient:
                 self.call_peer = sender
                 self.target_user = sender
                 self.call_state = "TALKING"
+                self.ensure_udp_registration()
                 self.safe_log(f"[系统] {sender} 已接听，一对一通话建立", align="center")
                 self.start_realtime_voice()
             elif msg_type == "hangup":
@@ -820,6 +869,12 @@ class MultiFunctionClient:
         try:
             if self.sock:
                 self.sock.close()
+        except Exception:
+            pass
+
+        try:
+            if self.udp_sock:
+                self.udp_sock.close()
         except Exception:
             pass
 

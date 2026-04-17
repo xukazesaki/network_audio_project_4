@@ -14,6 +14,7 @@ SERVER_RECEIVE_DIR = DATA_DIR / "server_received"
 # TCP network settings (原有服务器通信)
 HOST = "127.0.0.1"
 PORT = 8080
+UDP_PORT = 5008
 
 # Audio settings
 CHUNK = 1024
