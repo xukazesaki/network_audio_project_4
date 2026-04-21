@@ -3,6 +3,7 @@ import os
 import socket
 import threading
 import time
+import json
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog
 
@@ -29,6 +30,8 @@ from src.core.multicast_audio import MulticastReceiver, MulticastSender
 from src.core.protocol import recv_packet, send_packet
 
 UDP_REGISTER_PACKET = b"__udp_register__"
+# 聊天记录保存路径
+CHAT_HISTORY_FILE = os.path.join(os.path.dirname(__file__), "chat_history.json")
 
 
 class MultiFunctionClient:
@@ -68,8 +71,9 @@ class MultiFunctionClient:
         self.call_state = "IDLE"
         self.call_peer = None
         self.ringing_from = None
-        self.chat_history = {}        # {session: [(msg, tag)]}
+        self.chat_history = self._load_chat_history()  # 加载本地聊天记录
         self.current_session = "default"
+        
         self._build_ui()
 
         if not self.connect_and_auth():
@@ -80,6 +84,60 @@ class MultiFunctionClient:
         self.refresh_user_listbox()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(400, self.update_status)
+
+    # 加载本地聊天记录
+    def _load_chat_history(self):
+        try:
+            if os.path.exists(CHAT_HISTORY_FILE):
+                with open(CHAT_HISTORY_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"加载聊天记录失败: {e}")
+        return {}
+
+    # 保存聊天记录到本地
+    def _save_chat_history(self):
+        try:
+            # 创建目录（如果不存在）
+            os.makedirs(os.path.dirname(CHAT_HISTORY_FILE), exist_ok=True)
+            with open(CHAT_HISTORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.chat_history, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存聊天记录失败: {e}")
+
+    # 私有方法：显示系统提示（仅在必要时使用）
+    def _show_system_message(self, msg, align="center", show_in_chat=True):
+        if not show_in_chat:
+            return
+        tag = "system"
+        session = self.current_session or "default"
+
+        if session not in self.chat_history:
+            self.chat_history[session] = []
+        self.chat_history[session].append((msg, tag))
+
+        if session == self.current_session:
+            self.chat_display.config(state="normal")
+            self.chat_display.insert(tk.END, msg + "\n", tag)
+            self.chat_display.config(state="disabled")
+            self.chat_display.see(tk.END)
+
+    # 私有方法：显示用户消息
+    def _show_user_message(self, msg, is_self=False):
+        tag = "self_msg" if is_self else "other_msg"
+        session = self.current_session or "default"
+
+        if session not in self.chat_history:
+            self.chat_history[session] = []
+        self.chat_history[session].append((msg, tag))
+
+        if session == self.current_session:
+            self.chat_display.config(state="normal")
+            self.chat_display.insert(tk.END, msg + "\n", tag)
+            self.chat_display.config(state="disabled")
+            self.chat_display.see(tk.END)
+        # 自动保存聊天记录
+        self._save_chat_history()
 
     # 创建在线用户列表、聊天区、通话控制和媒体控制的界面布局。
     def _build_ui(self):
@@ -124,7 +182,11 @@ class MultiFunctionClient:
         main = tk.Frame(body)
         main.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
+      
         self.chat_display = scrolledtext.ScrolledText(main, state="disabled", bg="white")
+        self.chat_display.pack(fill=tk.BOTH, expand=True)
+# 关键修复：禁止点击获取焦点，点了也不会清空
+        self.chat_display.bind("<Button-1>", lambda e: "break")
         self.chat_display.pack(fill=tk.BOTH, expand=True)
         self.chat_display.tag_configure("self_msg", justify="right", foreground="#0b7f3f", spacing1=4)
         self.chat_display.tag_configure("other_msg", justify="left", foreground="black", spacing1=4)
@@ -179,7 +241,6 @@ class MultiFunctionClient:
             font=("Arial", 10),
         ).pack(fill=tk.X, pady=6)
 
-
     # 建立连接并完成注册/登录；认证成功后再启动后台线程。
     def connect_and_auth(self):
         try:
@@ -206,7 +267,7 @@ class MultiFunctionClient:
                 frames_per_buffer=CHUNK,
             )
 
-            self.log(f"[系统] 欢迎登录，当前用户: {self.my_name}", align="center")
+            self._show_system_message(f"[系统] 欢迎登录，当前用户: {self.my_name}", align="center")
             self.ensure_udp_registration()
             threading.Thread(target=self.receive_thread, daemon=True).start()
             threading.Thread(target=self.udp_receive_thread, daemon=True).start()
@@ -374,22 +435,7 @@ class MultiFunctionClient:
             return
         messagebox.showwarning("提示", f"收到未预期的认证响应：{msg_type}")
 
-    # 向主消息区追加一条带样式的文本。
-    def log(self, msg, align="left"):
-        tag = "self_msg" if align == "right" else ("system" if align == "center" else "other_msg")
-
-        session = self.current_session or "default"
-
-        if session not in self.chat_history:
-            self.chat_history[session] = []
-        self.chat_history[session].append((msg, tag))
-
-        if session == self.current_session:
-            self.chat_display.config(state="normal")
-            self.chat_display.insert(tk.END, msg + "\n", tag)
-            self.chat_display.config(state="disabled")
-            self.chat_display.see(tk.END)
-
+    # 加载聊天记录到界面
     def load_chat_history(self):
         self.chat_display.config(state="normal")
         self.chat_display.delete(1.0, tk.END)
@@ -403,10 +449,14 @@ class MultiFunctionClient:
         self.chat_display.config(state="disabled")
         self.chat_display.see(tk.END)
 
-
     # 让后台线程安全地向界面追加日志。
     def safe_log(self, msg, align="left"):
-        self.root.after(0, lambda: self.log(msg, align))
+        if align == "right":
+            self.root.after(0, lambda: self._show_user_message(msg, is_self=True))
+        elif align == "left":
+            self.root.after(0, lambda: self._show_user_message(msg, is_self=False))
+        else:
+            self.root.after(0, lambda: self._show_system_message(msg, align=align))
 
     # 根据在线用户和预留的好友数据刷新左侧列表。
     def refresh_user_listbox(self):
@@ -450,7 +500,6 @@ class MultiFunctionClient:
         self.current_session = username   # ⭐ 切换会话
         self.load_chat_history() 
 
-        self.log(f"[系统] 当前目标已切换为: {self.target_user}", align="center")
     # 为必须先选择目标用户的操作做前置检查。
     def require_target(self):
         if not self.target_user:
@@ -468,8 +517,9 @@ class MultiFunctionClient:
             return
 
         send_packet(self.sock, "text", self.my_name, {"target": self.target_user, "msg": msg})
-        self.log(f"我 -> {self.target_user}: {msg}", align="right")
+        self._show_user_message(f"我 -> {self.target_user}: {msg}", is_self=True)
         self.input_entry.delete(0, tk.END)
+        self._save_chat_history()
 
     # 选择本地文件并发送给当前目标用户。
     def send_file(self):
@@ -495,7 +545,8 @@ class MultiFunctionClient:
                 {"target": self.target_user, "filename": filename},
                 file_data,
             )
-            self.log(f"我 -> {self.target_user}: [文件] {filename}", align="right")
+            self._show_user_message(f"我 -> {self.target_user}: [文件] {filename}", is_self=True)
+            self._save_chat_history()
         except Exception as e:
             messagebox.showerror("错误", f"文件发送失败: {e}")
 
@@ -506,12 +557,13 @@ class MultiFunctionClient:
 
         def task():
             try:
-                self.safe_log("[系统] 正在录制 5 秒语音...", align="center")
+                self._show_system_message("[系统] 正在录制 5 秒语音...", align="center")
                 data = self.audio_manager.record_audio(5)
                 send_packet(self.sock, "audio", self.my_name, {"target": self.target_user}, data)
-                self.safe_log(f"我 -> {self.target_user}: [语音消息]", align="right")
+                self._show_user_message(f"我 -> {self.target_user}: [语音消息]", is_self=True)
+                self._save_chat_history()
             except Exception as e:
-                self.safe_log(f"[系统] 录音发送失败: {e}", align="center")
+                self._show_system_message(f"[系统] 录音发送失败: {e}", align="center")
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -530,7 +582,7 @@ class MultiFunctionClient:
         self.call_state = "CALLING"
         self.call_peer = self.target_user
         send_packet(self.sock, "call", self.my_name, {"target": self.target_user})
-        self.log(f"[系统] 正在呼叫 {self.target_user}...", align="center")
+        self._show_system_message(f"[系统] 正在呼叫 {self.target_user}...", align="center")
 
     # 在通话建立后自动开启实时语音发送。
     def start_realtime_voice(self):
@@ -545,7 +597,7 @@ class MultiFunctionClient:
         self.buffer.clear()
         self.is_recording = True
         threading.Thread(target=self.record_stream_thread, daemon=True).start()
-        self.log(f"[系统] 已开始与 {self.call_peer} 一对一实时通话", align="center")
+        self._show_system_message(f"[系统] 已开始与 {self.call_peer} 一对一实时通话", align="center")
 
     # 接听当前正在响铃的来电，并开始实时语音。
     def accept_call(self):
@@ -557,7 +609,7 @@ class MultiFunctionClient:
         self.target_user = self.ringing_from
         self.call_state = "TALKING"
         send_packet(self.sock, "accept", self.my_name, {"target": self.ringing_from})
-        self.log(f"[系统] 已接听 {self.ringing_from}", align="center")
+        self._show_system_message(f"[系统] 已接听 {self.ringing_from}", align="center")
 
         self.ringing_from = None
         self.start_realtime_voice()
@@ -571,7 +623,7 @@ class MultiFunctionClient:
 
         send_packet(self.sock, "hangup", self.my_name, {"target": peer})
         self._reset_call_state()
-        self.log("[系统] 已挂断", align="center")
+        self._show_system_message("[系统] 已挂断", align="center")
 
     def _reset_call_state(self):
         self.call_state = "IDLE"
@@ -606,7 +658,7 @@ class MultiFunctionClient:
                     self.udp_sock.sendto(data, self.udp_server_addr)
         except Exception as e:
             if self.running:
-                self.safe_log(f"[系统] 一对一实时语音发送失败: {e}", align="center")
+                self._show_system_message(f"[系统] 一对一实时语音发送失败: {e}", align="center")
         finally:
             self.is_recording = False
             if stream is not None:
@@ -627,7 +679,7 @@ class MultiFunctionClient:
                 break
             except Exception as e:
                 if self.running:
-                    self.safe_log(f"[system] UDP audio receive failed: {e}", align="center")
+                    self._show_system_message(f"[system] UDP audio receive failed: {e}", align="center")
                 time.sleep(0.05)
                 continue
 
@@ -662,13 +714,10 @@ class MultiFunctionClient:
             send_packet(self.sock, "mcast_join", self.my_name)
 
             threading.Thread(target=self.multicast_receive_thread, daemon=True).start()
-            self.log(
-                f"[系统] 已加入组播会议 {MCAST_GRP}:{MCAST_PORT}，现在可以开始多人通话",
-                align="center",
-            )
+            # 加入组播成功提示
+            messagebox.showinfo("成功", f"已加入组播会议 {MCAST_GRP}:{MCAST_PORT}，现在可以开始多人通话")
             self.current_session = "group"
             self.load_chat_history()
-
 
         except Exception as e:
             self.multicast_joined = False
@@ -705,7 +754,8 @@ class MultiFunctionClient:
             self.multicast_sender = None
 
         self.update_mcast_listbox([])
-        self.log("[系统] 已退出组播会议", align="center")
+        # 仅弹窗提示，不在聊天区显示
+        messagebox.showinfo("提示", "已退出组播会议")
 
     def start_multicast_talk(self):
         if not self.multicast_joined:
@@ -715,13 +765,13 @@ class MultiFunctionClient:
 
         self.multicast_speaking = True
         threading.Thread(target=self.multicast_record_thread, daemon=True).start()
-        self.log("[系统] 已开始组播发言，组内所有成员都可以听到你", align="center")
+        self._show_system_message("[系统] 已开始组播发言，组内所有成员都可以听到你", align="center")
 
     def stop_multicast_talk(self):
         if not self.multicast_speaking:
             return
         self.multicast_speaking = False
-        self.log("[系统] 已停止组播发言", align="center")
+        self._show_system_message("[系统] 已停止组播发言", align="center")
 
     def multicast_record_thread(self):
         pa = pyaudio.PyAudio()
@@ -739,7 +789,7 @@ class MultiFunctionClient:
                 self.multicast_sender.send(data)
         except Exception as e:
             if self.running:
-                self.safe_log(f"[系统] 组播发言失败: {e}", align="center")
+                self._show_system_message(f"[系统] 组播发言失败: {e}", align="center")
         finally:
             self.multicast_speaking = False
             if stream is not None:
@@ -760,7 +810,7 @@ class MultiFunctionClient:
                     self.multicast_buffer.append(data)
             except Exception as e:
                 if self.running and self.multicast_joined:
-                    self.safe_log(f"[系统] 接收组播语音失败: {e}", align="center")
+                    self._show_system_message(f"[系统] 接收组播语音失败: {e}", align="center")
                 time.sleep(0.05)
 
     # =========================
@@ -772,7 +822,7 @@ class MultiFunctionClient:
             header, payload = recv_packet(self.sock)
             if not header:
                 if self.running:
-                    self.safe_log("[系统] 与服务器连接已断开", align="center")
+                    self._show_system_message("[系统] 与服务器连接已断开", align="center")
                 self.running = False
                 break
 
@@ -809,26 +859,26 @@ class MultiFunctionClient:
                         send_packet(self.sock, "hangup", self.my_name, {"target": sender})
                     except Exception:
                         pass
-                    self.safe_log(f"[系统] {sender} 来电，忙线已自动拒绝", align="center")
+                    self._show_system_message(f"[系统] {sender} 来电，忙线已自动拒绝", align="center")
                 else:
                     self.ringing_from = sender
                     self.call_state = "RINGING"
-                    self.safe_log(f"[系统] {sender} 正在呼叫你", align="center")
+                    self._show_system_message(f"[系统] {sender} 正在呼叫你", align="center")
                     self.root.after(0, lambda s=sender: messagebox.showinfo("来电", f"{s} 正在呼叫你"))
             elif msg_type == "accept":
                 self.call_peer = sender
                 self.target_user = sender
                 self.call_state = "TALKING"
                 self.ensure_udp_registration()
-                self.safe_log(f"[系统] {sender} 已接听，一对一通话建立", align="center")
+                self._show_system_message(f"[系统] {sender} 已接听，一对一通话建立", align="center")
                 self.start_realtime_voice()
             elif msg_type == "hangup":
-                self.safe_log(f"[系统] {sender} 已挂断", align="center")
+                self._show_system_message(f"[系统] {sender} 已挂断", align="center")
                 self._reset_call_state()
             elif msg_type in {"register_ok", "register_error", "login_ok", "login_error"}:
                 continue
             else:
-                self.safe_log(f"[系统] 收到未知消息类型: {msg_type}", align="center")
+                self._show_system_message(f"[系统] 收到未知消息类型: {msg_type}", align="center")
 
     # 播放线程：同时支持一对一实时语音与组播语音
     def playback_thread(self):
@@ -857,7 +907,7 @@ class MultiFunctionClient:
 
             except Exception as e:
                 if self.running:
-                    self.safe_log(f"[系统] 播放失败: {e}", align="center")
+                    self._show_system_message(f"[系统] 播放失败: {e}", align="center")
                 time.sleep(0.05)
 
     # 刷新窗口顶部显示的简要状态栏。
@@ -891,6 +941,9 @@ class MultiFunctionClient:
         self.running = False
         self.is_recording = False
         self.multicast_speaking = False
+
+        # 保存聊天记录
+        self._save_chat_history()
 
         self.leave_multicast()
 

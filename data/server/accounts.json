@@ -62,6 +62,24 @@
       "pending_outgoing": [],
       "created_at": "2026-04-17T04:17:59Z",
       "updated_at": "2026-04-17T04:17:59Z"
+    },
+    "soo": {
+      "username": "soo",
+      "nickname": "soo",
+      "friends": [],
+      "pending_incoming": [],
+      "pending_outgoing": [],
+      "created_at": "2026-04-21T12:36:23Z",
+      "updated_at": "2026-04-21T12:36:23Z"
+    },
+    "yzai": {
+      "username": "yzai",
+      "nickname": "yzai",
+      "friends": [],
+      "pending_incoming": [],
+      "pending_outgoing": [],
+      "created_at": "2026-04-21T12:37:30Z",
+      "updated_at": "2026-04-21T12:37:30Z"
     }
   }
 }

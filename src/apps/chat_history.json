@@ -1,0 +1,44 @@
+{
+  "default": [
+    [
+      "[系统] 欢迎登录，当前用户: yzai",
+      "system"
+    ],
+    [
+      "[系统] 欢迎登录，当前用户: soo",
+      "system"
+    ],
+    [
+      "yzai: ddffgghhh",
+      "other_msg"
+    ]
+  ],
+  "soo": [
+    [
+      "我 -> soo: dhhjuii",
+      "self_msg"
+    ],
+    [
+      "我 -> soo: [文件] record.wav",
+      "self_msg"
+    ],
+    [
+      "我 -> soo: fff",
+      "self_msg"
+    ],
+    [
+      "soo: ffggg",
+      "other_msg"
+    ]
+  ],
+  "dlq": [
+    [
+      "我 -> dlq: ffffg",
+      "self_msg"
+    ],
+    [
+      "我 -> dlq: fvgggg",
+      "self_msg"
+    ]
+  ]
+}
