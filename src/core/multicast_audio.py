@@ -45,7 +45,8 @@ class MulticastSender:
             self.sock.close()
         except Exception:
             pass
-
+    
+    
 
 class MulticastReceiver:
     """UDP 组播接收端：负责加入组播组并接收语音数据。"""
@@ -103,3 +104,5 @@ class MulticastReceiver:
             self.sock.close()
         except Exception:
             pass
+
+    

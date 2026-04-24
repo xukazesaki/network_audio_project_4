@@ -35,6 +35,42 @@
       "pending_outgoing": [],
       "created_at": "2026-04-03T04:04:02Z",
       "updated_at": "2026-04-03T04:04:02Z"
+    },
+    "1": {
+      "username": "1",
+      "nickname": "1",
+      "friends": [],
+      "pending_incoming": [],
+      "pending_outgoing": [],
+      "created_at": "2026-04-24T01:50:31Z",
+      "updated_at": "2026-04-24T01:50:31Z"
+    },
+    "2": {
+      "username": "2",
+      "nickname": "2",
+      "friends": [],
+      "pending_incoming": [],
+      "pending_outgoing": [],
+      "created_at": "2026-04-24T02:12:51Z",
+      "updated_at": "2026-04-24T02:12:51Z"
+    },
+    "3": {
+      "username": "3",
+      "nickname": "3",
+      "friends": [],
+      "pending_incoming": [],
+      "pending_outgoing": [],
+      "created_at": "2026-04-24T02:23:06Z",
+      "updated_at": "2026-04-24T02:23:06Z"
+    },
+    "4": {
+      "username": "4",
+      "nickname": "4",
+      "friends": [],
+      "pending_incoming": [],
+      "pending_outgoing": [],
+      "created_at": "2026-04-24T02:26:07Z",
+      "updated_at": "2026-04-24T02:26:07Z"
     }
   }
 }

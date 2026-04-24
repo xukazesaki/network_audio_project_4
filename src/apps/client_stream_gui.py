@@ -6,6 +6,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog
 
+import numpy as np
 import pyaudio
 
 from src.core.audio_manager import AudioManager
@@ -617,7 +618,14 @@ class MultiFunctionClient:
                 continue
 
             self.buffer.append(data)
-
+    
+    def update_status(self):
+        """定时更新客户端GUI状态、在线用户列表与连接信息"""
+        try:
+            self.refresh_user_listbox()
+        except Exception as e:
+            pass
+        self.root.after(1000, self.update_status)
     # =========================
     # 新增组播会议功能
     # =========================
@@ -638,6 +646,9 @@ class MultiFunctionClient:
             send_packet(self.sock, "mcast_join", self.my_name)
 
             threading.Thread(target=self.multicast_receive_thread, daemon=True).start()
+            
+            threading.Thread(target=self.playback_thread, daemon=True).start()
+            
             self.log(
                 f"[系统] 已加入组播会议 {MCAST_GRP}:{MCAST_PORT}，现在可以开始多人通话",
                 align="center",
@@ -803,7 +814,7 @@ class MultiFunctionClient:
                 self.safe_log(f"[系统] 收到未知消息类型: {msg_type}", align="center")
 
     # 播放线程：同时支持一对一实时语音与组播语音
-    def playback_thread(self):
+    '''def playback_thread(self):
         while self.running:
             try:
                 played = False
@@ -830,33 +841,57 @@ class MultiFunctionClient:
             except Exception as e:
                 if self.running:
                     self.safe_log(f"[系统] 播放失败: {e}", align="center")
-                time.sleep(0.05)
+                time.sleep(0.05)'''
+    
 
-    # 刷新窗口顶部显示的简要状态栏。
-    def update_status(self):
-        state_map = {
-            "IDLE": "空闲",
-            "CALLING": "呼叫中",
-            "RINGING": "响铃中",
-            "TALKING": "一对一通话中",
-        }
-        target = self.target_user or "未选择"
-        login_state = self.my_name or "未登录"
-        multicast_state = "已加入" if self.multicast_joined else "未加入"
-        if self.multicast_joined and self.multicast_speaking:
-            multicast_state += "/发言中"
+    def playback_thread(self):
+     while self.running:
+        try:
+            played = False
 
-        self.status_label.config(
-            text=(
-                f"状态: {state_map.get(self.call_state, self.call_state)} | "
-                f"一对一缓冲区: {len(self.buffer)} | "
-                f"组播缓冲区: {len(self.multicast_buffer)} | "
-                f"目标: {target} | 在线: {len(self.online_users)} | "
-                f"组播: {multicast_state}"
-            )
-        )
-        if self.running:
-            self.root.after(400, self.update_status)
+            if (
+                self.call_state == "TALKING"
+                and len(self.buffer) >= JITTER_START_THRESHOLD
+                and self.play_stream is not None
+            ):
+                self.play_stream.write(self.buffer.popleft())
+                played = True
+
+            elif (
+                self.multicast_joined
+                and len(self.multicast_buffer) >= JITTER_START_THRESHOLD
+                and self.play_stream is not None
+            ):
+                frames = []
+                while len(self.multicast_buffer) > 0:
+                    frames.append(self.multicast_buffer.popleft())
+
+                arrays = []
+                for data in frames:
+                    arr = np.frombuffer(data, dtype=np.int16)
+                    arrays.append(arr)
+
+                min_len = min(len(a) for a in arrays)
+                arrays = [a[:min_len] for a in arrays]
+                mixed = np.sum(arrays, axis=0)
+                mixed = np.clip(mixed, -32768, 32767)
+                mixed_data = mixed.astype(np.int16).tobytes()
+
+                self.play_stream.write(mixed_data)
+                played = True
+
+            if not played:
+                time.sleep(0.01)
+
+        except Exception as e:
+            if self.running:
+                self.safe_log(f"[系统] 播放失败: {e}", align="center")
+            time.sleep(0.05)
+
+    
+
+
+   
 
     # 关闭 socket、音频流和窗口，完成资源清理。
     def on_close(self):
@@ -897,6 +932,63 @@ class MultiFunctionClient:
             pass
 
         self.root.destroy()
+
+   
+
+def mix_voice_frames(self, frames_list):
+    """
+    混音方案1：简单线性叠加（基础版）
+    多个音频帧混合成一帧
+    """
+    if not frames_list:
+        return b''
+
+    # 把所有音频转成 numpy 数组
+    arrays = []
+    for data in frames_list:
+        arr = np.frombuffer(data, dtype=np.int16)
+        arrays.append(arr)
+
+    # 对齐长度（取最短）
+    min_len = min(len(arr) for arr in arrays)
+    arrays = [arr[:min_len] for arr in arrays]
+
+    # 叠加混音
+    mixed = np.zeros(min_len, dtype=np.float32)
+    for arr in arrays:
+        mixed += arr.astype(np.float32)
+
+    # 归一化防止爆音（关键）
+    max_val = np.max(np.abs(mixed))
+    if max_val > 0:
+        mixed = (mixed / max_val) * 32767
+
+    # 转回 bytes
+    return mixed.astype(np.int16).tobytes()
+
+def mix_voice_frames_safe(self, frames_list):
+    """
+    混音方案2：限幅安全混音（升级版，不爆音）
+    报告里可以写：同一目标不同方案
+    """
+    if not frames_list:
+        return b''
+
+    arrays = []
+    for data in frames_list:
+        arr = np.frombuffer(data, dtype=np.int16)
+        arrays.append(arr)
+
+    min_len = min(len(arr) for arr in arrays)
+    arrays = [arr[:min_len] for arr in arrays]
+
+    mixed = np.zeros(min_len, dtype=np.int32)
+    for arr in arrays:
+        mixed += arr
+
+    # 直接硬限幅，更稳定
+    mixed = np.clip(mixed, -32768, 32767)
+    return mixed.astype(np.int16).tobytes()
 
 
 if __name__ == "__main__":
