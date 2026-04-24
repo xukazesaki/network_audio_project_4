@@ -984,3 +984,6 @@ if __name__ == "__main__":
     root = tk.Tk()
     client = MultiFunctionClient(root)
     root.mainloop()
+
+    from src.core.config import HOST, PORT
+    print("当前配置:", HOST, PORT)

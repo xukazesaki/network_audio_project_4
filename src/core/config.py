@@ -11,8 +11,8 @@ RECEIVE_DIR = DATA_DIR / "received"
 SERVER_DATA_DIR = DATA_DIR / "server"
 SERVER_RECEIVE_DIR = DATA_DIR / "server_received"
 
-# TCP network settings (原有服务器通信)
-HOST = "10.192.38.194"
+# TCP network settings
+HOST = "127.0.0.1"
 PORT = 8080
 UDP_PORT = 5008
 

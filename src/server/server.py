@@ -10,6 +10,7 @@ from src.core.config import CHANNELS, CHUNK, FORMAT, HOST, PORT, RATE, SERVER_RE
 from src.core.protocol import recv_packet, send_packet
 from src.server.auth_service import AuthService
 
+print("🔥 server 真启动了")
 
 clients = {}  # {username: socket}
 clients_lock = threading.Lock()
@@ -489,7 +490,7 @@ if __name__ == "__main__":
 
     server_socket = socket.socket()
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind((HOST, PORT))
+    server_socket.bind(("127.0.0.1", 8080))
     server_socket.listen(10)
     print(f"服务器已启动: {HOST}:{PORT}")
 
@@ -502,7 +503,9 @@ if __name__ == "__main__":
     try:
         while server_running:
             try:
+                print("等待连接中...")
                 client_conn, client_addr = server_socket.accept()
+                print("有人连接了:", client_addr)
             except OSError:
                 break
             threading.Thread(target=handle_client, args=(client_conn, client_addr), daemon=True).start()

@@ -11,6 +11,14 @@
     [
       "yzai: ddffgghhh",
       "other_msg"
+    ],
+    [
+      "[系统] 欢迎登录，当前用户: yzai",
+      "system"
+    ],
+    [
+      "[系统] 欢迎登录，当前用户: dlq",
+      "system"
     ]
   ],
   "soo": [
@@ -29,6 +37,10 @@
     [
       "soo: ffggg",
       "other_msg"
+    ],
+    [
+      "我 -> soo: yzai给丁发",
+      "self_msg"
     ]
   ],
   "dlq": [
@@ -38,6 +50,10 @@
     ],
     [
       "我 -> dlq: fvgggg",
+      "self_msg"
+    ],
+    [
+      "我 -> dlq: ddffff",
       "self_msg"
     ]
   ]
