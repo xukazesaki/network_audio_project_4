@@ -629,7 +629,7 @@ class MultiFunctionClient:
 
         try:
             self.multicast_receiver = MulticastReceiver()
-            self.multicast_sender = MulticastSender()
+            self.multicast_sender = MulticastSender(sender_id=self.my_name)
             self.multicast_joined = True
             self.multicast_speaking = False
             self.multicast_buffer.clear()
@@ -725,11 +725,16 @@ class MultiFunctionClient:
     def multicast_receive_thread(self):
         while self.running and self.multicast_joined and self.multicast_receiver is not None:
             try:
-                data, addr = self.multicast_receiver.recv()
+                data, addr, header = self.multicast_receiver.recv()
                 if not self.running or not self.multicast_joined:
                     break
-                if data:
-                    self.multicast_buffer.append(data)
+                if not data or not header:
+                    continue
+                if header.get("sender") == self.my_name:
+                    continue
+                if len(data) != self.expected_udp_bytes:
+                    continue
+                self.multicast_buffer.append(data)
             except Exception as e:
                 if self.running and self.multicast_joined:
                     self.safe_log(f"[系统] 接收组播语音失败: {e}", align="center")

@@ -1,14 +1,43 @@
+import json
 import socket
 import struct
-from typing import Optional, Tuple
+import time
+from typing import Any, Dict, Optional, Tuple
 
-from src.core.config import (
-    MCAST_BUFFER_SIZE,
-    MCAST_GRP,
-    MCAST_LOOPBACK,
-    MCAST_PORT,
-    MCAST_TTL,
-)
+from src.core.config import MCAST_BUFFER_SIZE, MCAST_GRP, MCAST_LOOPBACK, MCAST_PORT, MCAST_TTL
+
+
+MCAST_MAGIC = b"MCA1"
+MCAST_PREFIX_STRUCT = struct.Struct("!4sH")
+
+
+def _encode_packet_header(header: Dict[str, Any]) -> bytes:
+    header_bytes = json.dumps(header, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return MCAST_PREFIX_STRUCT.pack(MCAST_MAGIC, len(header_bytes)) + header_bytes
+
+
+def _decode_packet(raw_packet: bytes) -> Tuple[Optional[Dict[str, Any]], Optional[bytes]]:
+    if len(raw_packet) < MCAST_PREFIX_STRUCT.size:
+        return None, None
+
+    magic, header_len = MCAST_PREFIX_STRUCT.unpack(raw_packet[: MCAST_PREFIX_STRUCT.size])
+    if magic != MCAST_MAGIC:
+        return None, None
+
+    header_end = MCAST_PREFIX_STRUCT.size + header_len
+    if len(raw_packet) < header_end:
+        return None, None
+
+    try:
+        header = json.loads(raw_packet[MCAST_PREFIX_STRUCT.size:header_end].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, None
+
+    payload = raw_packet[header_end:]
+    if int(header.get("payload_len", -1)) != len(payload):
+        return None, None
+
+    return header, payload
 
 
 class MulticastSender:
@@ -20,9 +49,12 @@ class MulticastSender:
         port: int = MCAST_PORT,
         ttl: int = MCAST_TTL,
         loopback: bool = MCAST_LOOPBACK,
+        sender_id: str = "",
     ):
         self.group_ip = group_ip
         self.port = port
+        self.sender_id = sender_id or "unknown"
+        self.sequence = 0
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 
         # TTL 决定组播报文可跨越的路由跳数；局域网实验 1~2 即可
@@ -38,7 +70,17 @@ class MulticastSender:
     def send(self, data: bytes) -> None:
         if not data:
             return
-        self.sock.sendto(data, (self.group_ip, self.port))
+
+        header = {
+            "version": 1,
+            "sender": self.sender_id,
+            "seq": self.sequence,
+            "timestamp_ms": int(time.time() * 1000),
+            "payload_len": len(data),
+        }
+        packet = _encode_packet_header(header) + data
+        self.sock.sendto(packet, (self.group_ip, self.port))
+        self.sequence += 1
 
     def close(self) -> None:
         try:
@@ -79,14 +121,17 @@ class MulticastReceiver:
         # 设超时，便于线程优雅退出
         self.sock.settimeout(0.5)
 
-    def recv(self) -> Tuple[Optional[bytes], Optional[Tuple[str, int]]]:
+    def recv(self) -> Tuple[Optional[bytes], Optional[Tuple[str, int]], Optional[Dict[str, Any]]]:
         try:
-            data, addr = self.sock.recvfrom(self.buffer_size)
-            return data, addr
+            raw_packet, addr = self.sock.recvfrom(self.buffer_size)
+            header, payload = _decode_packet(raw_packet)
+            if header is None or payload is None:
+                return None, addr, None
+            return payload, addr, header
         except socket.timeout:
-            return None, None
+            return None, None, None
         except OSError:
-            return None, None
+            return None, None, None
 
     def close(self) -> None:
         try:
