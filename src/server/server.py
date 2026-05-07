@@ -1,3 +1,4 @@
+import sys
 import os
 import select
 import socket
@@ -5,12 +6,14 @@ import threading
 import time
 import wave
 
+
+
 from src.core.audio_manager import AudioManager
 from src.core.config import CHANNELS, CHUNK, FORMAT, HOST, PORT, RATE, SERVER_RECEIVE_DIR, UDP_PORT
 from src.core.protocol import recv_packet, send_packet
 from src.server.auth_service import AuthService
 
-print("🔥 server 真启动了")
+print("server 启动了")
 
 clients = {}  # {username: socket}
 clients_lock = threading.Lock()
@@ -485,12 +488,12 @@ def _read_wave_as_pcm(file_path: str) -> bytes:
         return wf.readframes(wf.getnframes())
 
 
-if __name__ == "__main__":
+"""if __name__ == "__main__":#
     ensure_server_dirs()
 
     server_socket = socket.socket()
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind(("127.0.0.1", 8080))
+    server_socket.bind(("0,0,0,0", 8080))
     server_socket.listen(10)
     print(f"服务器已启动: {HOST}:{PORT}")
 
@@ -522,3 +525,57 @@ if __name__ == "__main__":
             pass
 
         print("服务端已关闭")
+"""
+if __name__ == "__main__":
+    ensure_server_dirs()
+
+    # 1. 建立 Socket
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    
+    # 2. 強制綁定所有網卡
+    try:
+        server_socket.bind(("0.0.0.0", 8080))
+        server_socket.listen(10)
+        # 獲取本機實際 IP 顯示出來，方便別人連你
+        hostname = socket.gethostname()
+        local_ip = socket.gethostbyname(hostname)
+        print(f"伺服器啟動成功！")
+        print(f"本機區域網 IP: {local_ip} (請讓同學連這個地址)")
+        print(f"監聽端口: 8080")
+    except Exception as e:
+        print(f"綁定失敗，可能是端口 8080 被佔用: {e}")
+        exit(1)
+
+    # 啟動 UDP 轉發
+    threading.Thread(target=start_udp_audio_relay, daemon=True).start()
+    
+    # 主循環
+    try:
+        while server_running:
+            client_conn, client_addr = server_socket.accept()
+            print(f"🔔 偵測到連接請求: {client_addr}") # 如果這行沒印出來，說明請求根本沒到
+            threading.Thread(target=handle_client, args=(client_conn, client_addr), daemon=True).start()
+    except KeyboardInterrupt:
+        print("停止伺服器...")
+    finally:
+        server_socket.close()
+
+    # ... 前面的代碼保持不變 ...
+    
+    print("--- 正在等待客戶端握手 (Accepting...) ---")
+    try:
+        while server_running:
+            # 加入這兩行調試日誌
+            print(">>> 伺服器正在 accept() 阻塞中，等待新客人...") 
+            client_conn, client_addr = server_socket.accept()
+            print(f">>> 哇！捕捉到新連接: {client_addr}") 
+
+            # 原有的處理邏輯
+            threading.Thread(target=handle_client, args=(client_conn, client_addr), daemon=True).start()
+            
+    except Exception as e:
+        print(f"❌ 接收連線時發生錯誤: {e}")
+    finally:
+        server_socket.close()
+        print("服務端已關閉")
