@@ -4,7 +4,14 @@ import struct
 import time
 from typing import Any, Dict, Optional, Tuple
 
-from src.core.config import MCAST_BUFFER_SIZE, MCAST_GRP, MCAST_LOOPBACK, MCAST_PORT, MCAST_TTL
+from src.core.config import (
+    MCAST_BUFFER_SIZE,
+    MCAST_GRP,
+    MCAST_INTERFACE_IP,
+    MCAST_LOOPBACK,
+    MCAST_PORT,
+    MCAST_TTL,
+)
 
 
 MCAST_MAGIC = b"MCA1"
@@ -49,10 +56,12 @@ class MulticastSender:
         port: int = MCAST_PORT,
         ttl: int = MCAST_TTL,
         loopback: bool = MCAST_LOOPBACK,
+        interface_ip: str = MCAST_INTERFACE_IP,
         sender_id: str = "",
     ):
         self.group_ip = group_ip
         self.port = port
+        self.interface_ip = interface_ip
         self.sender_id = sender_id or "unknown"
         self.sequence = 0
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -66,6 +75,14 @@ class MulticastSender:
             socket.IP_MULTICAST_LOOP,
             1 if loopback else 0,
         )
+
+        # On multi-homed hosts, force multicast to use the intended NIC.
+        if self.interface_ip and self.interface_ip != "0.0.0.0":
+            self.sock.setsockopt(
+                socket.IPPROTO_IP,
+                socket.IP_MULTICAST_IF,
+                socket.inet_aton(self.interface_ip),
+            )
 
     def send(self, data: bytes) -> None:
         if not data:
@@ -97,10 +114,12 @@ class MulticastReceiver:
         group_ip: str = MCAST_GRP,
         port: int = MCAST_PORT,
         buffer_size: int = MCAST_BUFFER_SIZE,
+        interface_ip: str = MCAST_INTERFACE_IP,
     ):
         self.group_ip = group_ip
         self.port = port
         self.buffer_size = buffer_size
+        self.interface_ip = interface_ip
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 
@@ -114,7 +133,7 @@ class MulticastReceiver:
         membership = struct.pack(
             "4s4s",
             socket.inet_aton(self.group_ip),
-            socket.inet_aton("0.0.0.0"),
+            socket.inet_aton(self.interface_ip),
         )
         self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
 
@@ -138,7 +157,7 @@ class MulticastReceiver:
             membership = struct.pack(
                 "4s4s",
                 socket.inet_aton(self.group_ip),
-                socket.inet_aton("0.0.0.0"),
+                socket.inet_aton(self.interface_ip),
             )
             self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, membership)
         except Exception:
