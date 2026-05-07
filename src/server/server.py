@@ -6,7 +6,7 @@ import time
 import wave
 
 from src.core.audio_manager import AudioManager
-from src.core.config import CHANNELS, CHUNK, FORMAT, HOST, PORT, RATE, SERVER_RECEIVE_DIR, UDP_PORT
+from src.core.config import CHANNELS, CHUNK, FORMAT, HOST, PORT, RATE, SERVER_BIND_HOST, SERVER_RECEIVE_DIR, UDP_PORT
 from src.core.protocol import recv_packet, send_packet
 from src.server.auth_service import AuthService
 
@@ -489,9 +489,9 @@ if __name__ == "__main__":
 
     server_socket = socket.socket()
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind((HOST, PORT))
+    server_socket.bind((SERVER_BIND_HOST, PORT))
     server_socket.listen(10)
-    print(f"服务器已启动: {HOST}:{PORT}")
+    print(f"服务器已启动: {SERVER_BIND_HOST}:{PORT} (client HOST={HOST})")
 
     udp_thread = threading.Thread(target=start_udp_audio_relay, daemon=True)
     udp_thread.start()

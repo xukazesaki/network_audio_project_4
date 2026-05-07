@@ -11,10 +11,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Probe UDP multicast connectivity.")
     parser.add_argument("--name", default=socket.gethostname(), help="name shown in probe packets")
     parser.add_argument("--interval", type=float, default=1.0, help="seconds between probe packets")
+    parser.add_argument("--loopback", action="store_true", help="receive multicast sent by this host")
     args = parser.parse_args()
 
     sender_id = f"probe-{args.name}"
-    sender = MulticastSender(sender_id=sender_id)
+    sender = MulticastSender(sender_id=sender_id, loopback=args.loopback)
     receiver = MulticastReceiver()
     running = True
 
@@ -23,7 +24,7 @@ def main() -> None:
             payload, addr, header = receiver.recv()
             if not payload or not header:
                 continue
-            if header.get("sender") == sender_id:
+            if header.get("sender") == sender_id and not args.loopback:
                 continue
             text = payload.decode("utf-8", errors="replace")
             print(f"[recv] from={header.get('sender')} addr={addr} payload={text}", flush=True)
