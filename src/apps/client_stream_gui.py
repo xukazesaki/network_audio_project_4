@@ -5,6 +5,7 @@ import socket
 import threading
 import time
 import tkinter as tk
+import uuid
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog
 from array import array
 
@@ -57,6 +58,7 @@ class MultiFunctionClient:
         self.multicast_buffer = collections.deque(maxlen=JITTER_BUFFER_MAXLEN)
         self.multicast_sender = None
         self.multicast_receiver = None
+        self.multicast_sender_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
 
         self.audio_manager = AudioManager()
 
@@ -676,7 +678,7 @@ class MultiFunctionClient:
 
         try:
             self.multicast_receiver = MulticastReceiver()
-            self.multicast_sender = MulticastSender(sender_id=self.my_name)
+            self.multicast_sender = MulticastSender(sender_id=self.multicast_sender_id)
             self.multicast_joined = True
             self.multicast_speaking = False
             self.multicast_buffer.clear()
@@ -781,7 +783,7 @@ class MultiFunctionClient:
                     break
                 if not data or not header:
                     continue
-                if header.get("sender") == self.my_name:
+                if header.get("sender") == self.multicast_sender_id:
                     continue
                 if len(data) != self.expected_udp_bytes:
                     continue
