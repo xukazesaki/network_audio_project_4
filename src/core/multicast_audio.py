@@ -14,7 +14,26 @@ from src.core.config import (
 )
 
 
-from .protocol import _encode_packet, _decode_packet
+#from .protocol import _encode_packet, _decode_packet
+
+
+
+import json
+import struct
+
+def _encode_packet(audio_data: bytes, sender: str = "unknown") -> bytes:
+    header = json.dumps({"sender": sender}).encode("utf-8")
+    header_len = struct.pack(">I", len(header))
+    return header_len + header + audio_data
+
+def _decode_packet(raw_data: bytes):
+    try:
+        header_len = struct.unpack(">I", raw_data[:4])[0]
+        header = json.loads(raw_data[4:4+header_len].decode("utf-8"))
+        payload = raw_data[4+header_len:]
+        return header, payload
+    except:
+        return None, None
 
 MCAST_MAGIC = b"MCA1"
 MCAST_PREFIX_STRUCT = struct.Struct("!4sH")
