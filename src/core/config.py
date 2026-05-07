@@ -8,6 +8,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 CONTACTS_DIR = DATA_DIR / "contacts"
 RECORD_DIR = DATA_DIR / "recorded"
 RECEIVE_DIR = DATA_DIR / "received"
+CLIENT_DATA_DIR = DATA_DIR / "client"
 SERVER_DATA_DIR = DATA_DIR / "server"
 SERVER_RECEIVE_DIR = DATA_DIR / "server_received"
 
@@ -27,6 +28,7 @@ RATE = 44100
 # Storage paths
 CONTACTS_FILE = CONTACTS_DIR / "contacts.json"
 SAVED_CONTACTS_FILE = CONTACTS_DIR / "saved_contacts.txt"
+CHAT_HISTORY_FILE = CLIENT_DATA_DIR / "chat_history.json"
 SERVER_ACCOUNTS_FILE = SERVER_DATA_DIR / "accounts.json"
 
 # Realtime voice playback tuning

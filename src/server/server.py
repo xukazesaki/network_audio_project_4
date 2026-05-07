@@ -12,6 +12,7 @@ from src.server.auth_service import AuthService
 
 
 clients = {}  # {username: socket}
+client_send_locks = {}
 clients_lock = threading.Lock()
 server_running = True
 last_received_audio = None
@@ -21,6 +22,7 @@ EXPECTED_UDP_AUDIO_BYTES = CHUNK * 2
 
 # 新增：维护当前已加入组播会议的用户
 multicast_members = set()
+mcast_audio_stats = {}
 udp_clients = set()
 udp_clients_lock = threading.Lock()
 
@@ -34,12 +36,14 @@ def ensure_server_dirs():
 def _safe_send(username, msg_type, sender, data_dict=None, payload=None) -> bool:
     with clients_lock:
         conn = clients.get(username)
+        send_lock = client_send_locks.get(username)
 
-    if conn is None:
+    if conn is None or send_lock is None:
         return False
 
     try:
-        send_packet(conn, msg_type, sender, data_dict, payload)
+        with send_lock:
+            send_packet(conn, msg_type, sender, data_dict, payload)
         return True
     except Exception:
         remove_client(username)
@@ -95,7 +99,9 @@ def remove_client(username):
 
     with clients_lock:
         conn = clients.pop(username, None)
+        client_send_locks.pop(username, None)
         multicast_members.discard(username)
+        mcast_audio_stats.pop(username, None)
 
     if conn is not None:
         try:
@@ -257,6 +263,7 @@ def handle_auth_message(conn, msg_type, sender, current_user=None):
                 except Exception:
                     pass
             clients[username] = conn
+            client_send_locks.setdefault(username, threading.Lock())
 
         send_direct(conn, "login_ok", "Server", {"username": username, "nickname": user["nickname"]})
         print(f"[AUTH] 用户登录: {username}")
@@ -307,6 +314,30 @@ def handle_client(conn, addr):
                     multicast_members.discard(my_name)
                 print(f"[MCAST] {my_name} 退出组播会议")
                 broadcast_multicast_members()
+                continue
+
+            if msg_type == "mcast_audio":
+                if not payload or len(payload) != EXPECTED_UDP_AUDIO_BYTES:
+                    continue
+                with clients_lock:
+                    stats = mcast_audio_stats.setdefault(my_name, {"in": 0, "out": 0})
+                    stats["in"] += 1
+                    recipients = [
+                        name
+                        for name in multicast_members
+                        if name != my_name and name in clients
+                    ]
+                for username in recipients:
+                    if _safe_send(username, "mcast_audio", my_name, {}, payload):
+                        with clients_lock:
+                            stats = mcast_audio_stats.setdefault(my_name, {"in": 0, "out": 0})
+                            stats["out"] += 1
+                if mcast_audio_stats.get(my_name, {}).get("in", 0) % 100 == 0:
+                    stats = mcast_audio_stats.get(my_name, {"in": 0, "out": 0})
+                    print(
+                        f"[MCAST/TCP] {my_name} audio frames in={stats['in']} "
+                        f"forwarded={stats['out']} members={len(recipients) + 1}"
+                    )
                 continue
 
             extra = {
