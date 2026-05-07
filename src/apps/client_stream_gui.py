@@ -859,7 +859,7 @@ class MultiFunctionClient:
                 self.safe_log(f"[系统] 收到未知消息类型: {msg_type}", align="center")
 
     # 播放线程：同时支持一对一实时语音与组播语音
-    def playback_thread(self):
+    '''def playback_thread(self):
         while self.running:
             try:
                 played = False
@@ -892,8 +892,37 @@ class MultiFunctionClient:
             except Exception as e:
                 if self.running:
                     self.safe_log(f"[系统] 播放失败: {e}", align="center")
-                time.sleep(0.05)
+                time.sleep(0.05)'''
 
+
+    def playback_thread(self):
+     while self.running:
+        try:
+            played = False
+
+            # 一对一通话
+            if (self.call_state == "TALKING"
+                and len(self.buffer) > 0
+                and self.play_stream is not None):
+                self.play_stream.write(self.buffer.popleft())
+                played = True
+
+            # 组播播放：每次只播一帧！！！（修复回音+听不到）
+            elif (self.multicast_joined
+                  and len(self.multicast_buffer) > 0
+                  and self.play_stream is not None):
+                # 只取一帧播放，不要一次性取完
+                data = self.multicast_buffer.popleft()
+                self.play_stream.write(data)
+                played = True
+
+            if not played:
+                time.sleep(0.005)  # 更小延迟
+
+        except Exception as e:
+            if self.running:
+                self.safe_log(f"[系统] 播放失败: {e}", align="center")
+            time.sleep(0.01)
     # 刷新窗口顶部显示的简要状态栏。
     def _mix_multicast_frames(self, frames):
         if not frames:

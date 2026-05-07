@@ -14,6 +14,8 @@ from src.core.config import (
 )
 
 
+from .protocol import _encode_packet, _decode_packet
+
 MCAST_MAGIC = b"MCA1"
 MCAST_PREFIX_STRUCT = struct.Struct("!4sH")
 
@@ -47,7 +49,7 @@ def _decode_packet(raw_packet: bytes) -> Tuple[Optional[Dict[str, Any]], Optiona
     return header, payload
 
 
-class MulticastSender:
+'''class MulticastSender:
     """UDP 组播发送端：负责把麦克风音频发到组播组。"""
 
     def __init__(
@@ -103,11 +105,36 @@ class MulticastSender:
         try:
             self.sock.close()
         except Exception:
+            pass'''
+
+
+class MulticastSender:
+    def __init__(self, sender_id, group_ip=MCAST_GRP, port=MCAST_PORT):
+        self.sender_id = sender_id
+        self.group_ip = group_ip
+        self.port = port
+        self.dest = (group_ip, port)
+
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        
+        # ✅ 允许组播发送
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+
+    def send(self, audio_data):
+        try:
+            packet = _encode_packet(audio_data, sender=self.sender_id)
+            self.sock.sendto(packet, self.dest)
+        except Exception:
+            pass
+
+    def close(self):
+        try:
+            self.sock.close()
+        except Exception:
             pass
 
 
-class MulticastReceiver:
-    """UDP 组播接收端：负责加入组播组并接收语音数据。"""
+'''class MulticastReceiver:    """UDP 组播接收端：负责加入组播组并接收语音数据。"""
 
     def __init__(
         self,
@@ -160,6 +187,61 @@ class MulticastReceiver:
                 socket.inet_aton(self.interface_ip),
             )
             self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, membership)
+        except Exception:
+            pass
+
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+'''
+class MulticastReceiver:
+    """UDP 组播接收端：负责加入组播组并接收语音数据。"""
+
+    def __init__(
+        self,
+        group_ip: str = MCAST_GRP,
+        port: int = MCAST_PORT,
+        buffer_size: int = MCAST_BUFFER_SIZE,
+        interface_ip: str = MCAST_INTERFACE_IP,
+    ):
+        self.group_ip = group_ip
+        self.port = port
+        self.buffer_size = buffer_size
+        self.interface_ip = interface_ip
+
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+
+        # 允许端口复用
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        # ✅ 修复1：绑定 0.0.0.0 让所有网卡都能收到（别人电脑才能听到）
+        self.sock.bind(('0.0.0.0', self.port))
+
+        # ✅ 修复2：标准组播加入格式（跨平台必用）
+        mreq = struct.pack("4sl", socket.inet_aton(self.group_ip), socket.INADDR_ANY)
+        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+
+        # 超时
+        self.sock.settimeout(0.5)
+
+    def recv(self) -> Tuple[Optional[bytes], Optional[Tuple[str, int]], Optional[Dict[str, Any]]]:
+        try:
+            raw_packet, addr = self.sock.recvfrom(self.buffer_size)
+            header, payload = _decode_packet(raw_packet)
+            if header is None or payload is None:
+                return None, addr, None
+            return payload, addr, header
+        except socket.timeout:
+            return None, None, None
+        except OSError:
+            return None, None, None
+
+    def close(self) -> None:
+        try:
+            # 退出组播（用修复后的格式）
+            mreq = struct.pack("4sl", socket.inet_aton(self.group_ip), socket.INADDR_ANY)
+            self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, mreq)
         except Exception:
             pass
 
