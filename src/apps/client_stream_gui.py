@@ -5,6 +5,7 @@ import socket
 import threading
 import time
 import tkinter as tk
+import uuid
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog
 from array import array
 
@@ -57,6 +58,11 @@ class MultiFunctionClient:
         self.multicast_buffer = collections.deque(maxlen=JITTER_BUFFER_MAXLEN)
         self.multicast_sender = None
         self.multicast_receiver = None
+        self.multicast_sender_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
+        self.multicast_sent_frames = 0
+        self.multicast_recv_frames = 0
+        self.multicast_dropped_invalid = 0
+        self.multicast_dropped_self = 0
 
         self.audio_manager = AudioManager()
 
@@ -676,10 +682,12 @@ class MultiFunctionClient:
 
         try:
             self.multicast_receiver = MulticastReceiver()
-            self.multicast_sender = MulticastSender(sender_id=self.my_name)
+            self.multicast_sender = MulticastSender(sender_id=self.multicast_sender_id)
             self.multicast_joined = True
             self.multicast_speaking = False
             self.multicast_buffer.clear()
+            self.current_session = "group"
+            self.load_chat_history()
 
             # 新增：通知服务器同步组播成员列表
             send_packet(self.sock, "mcast_join", self.my_name)
@@ -689,10 +697,6 @@ class MultiFunctionClient:
                 f"[系统] 已加入组播会议 {MCAST_GRP}:{MCAST_PORT}，现在可以开始多人通话",
                 align="center",
             )
-            self.current_session = "group"
-            self.load_chat_history()
-
-
         except Exception as e:
             self.multicast_joined = False
             self.multicast_speaking = False
@@ -760,6 +764,7 @@ class MultiFunctionClient:
             while self.running and self.multicast_joined and self.multicast_speaking and self.multicast_sender:
                 data = stream.read(CHUNK, exception_on_overflow=False)
                 self.multicast_sender.send(data)
+                self.multicast_sent_frames += 1
         except Exception as e:
             if self.running:
                 self.safe_log(f"[系统] 组播发言失败: {e}", align="center")
@@ -780,11 +785,15 @@ class MultiFunctionClient:
                 if not self.running or not self.multicast_joined:
                     break
                 if not data or not header:
+                    self.multicast_dropped_invalid += 1
                     continue
-                if header.get("sender") == self.my_name:
+                if header.get("sender") == self.multicast_sender_id:
+                    self.multicast_dropped_self += 1
                     continue
                 if len(data) != self.expected_udp_bytes:
+                    self.multicast_dropped_invalid += 1
                     continue
+                self.multicast_recv_frames += 1
                 self.multicast_buffer.append(data)
             except Exception as e:
                 if self.running and self.multicast_joined:
@@ -972,6 +981,7 @@ class MultiFunctionClient:
                 f"状态: {state_map.get(self.call_state, self.call_state)} | "
                 f"一对一缓冲区: {len(self.buffer)} | "
                 f"组播缓冲区: {len(self.multicast_buffer)} | "
+                f"组播收/发: {self.multicast_recv_frames}/{self.multicast_sent_frames} | "
                 f"目标: {target} | 在线: {len(self.online_users)} | "
                 f"组播: {multicast_state}"
             )
