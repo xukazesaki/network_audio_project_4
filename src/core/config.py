@@ -12,7 +12,7 @@ SERVER_DATA_DIR = DATA_DIR / "server"
 SERVER_RECEIVE_DIR = DATA_DIR / "server_received"
 
 # TCP network settings
-HOST = "192.168.67.14"
+HOST = "10.192.61.21"
 PORT = 8080
 UDP_PORT = 5008
 
