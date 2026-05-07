@@ -1,10 +1,12 @@
 import collections
+import json
 import os
 import socket
 import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog
+from array import array
 
 import pyaudio
 
@@ -29,6 +31,7 @@ from src.core.multicast_audio import MulticastReceiver, MulticastSender
 from src.core.protocol import recv_packet, send_packet
 
 UDP_REGISTER_PACKET = b"__udp_register__"
+CHAT_HISTORY_FILE = os.path.join(os.path.dirname(__file__), "chat_history.json")
 
 
 class MultiFunctionClient:
@@ -68,7 +71,7 @@ class MultiFunctionClient:
         self.call_state = "IDLE"
         self.call_peer = None
         self.ringing_from = None
-        self.chat_history = {}        # {session: [(msg, tag)]}
+        self.chat_history = self._load_chat_history()
         self.current_session = "default"
         self._build_ui()
 
@@ -82,6 +85,25 @@ class MultiFunctionClient:
         self.root.after(400, self.update_status)
 
     # 创建在线用户列表、聊天区、通话控制和媒体控制的界面布局。
+    def _load_chat_history(self):
+        try:
+            if os.path.exists(CHAT_HISTORY_FILE):
+                with open(CHAT_HISTORY_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception as e:
+            print(f"load chat history failed: {e}")
+        return {}
+
+    def _save_chat_history(self):
+        try:
+            os.makedirs(os.path.dirname(CHAT_HISTORY_FILE), exist_ok=True)
+            with open(CHAT_HISTORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.chat_history, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"save chat history failed: {e}")
+
     def _build_ui(self):
         self.status_label = tk.Label(
             self.root,
@@ -389,6 +411,7 @@ class MultiFunctionClient:
             self.chat_display.insert(tk.END, msg + "\n", tag)
             self.chat_display.config(state="disabled")
             self.chat_display.see(tk.END)
+        self._save_chat_history()
 
     def load_chat_history(self):
         self.chat_display.config(state="normal")
@@ -854,8 +877,14 @@ class MultiFunctionClient:
                     and len(self.multicast_buffer) >= JITTER_START_THRESHOLD
                     and self.play_stream is not None
                 ):
-                    self.play_stream.write(self.multicast_buffer.popleft())
-                    played = True
+                    frames = []
+                    while self.multicast_buffer:
+                        frames.append(self.multicast_buffer.popleft())
+
+                    mixed_data = self._mix_multicast_frames(frames)
+                    if mixed_data:
+                        self.play_stream.write(mixed_data)
+                        played = True
 
                 if not played:
                     time.sleep(0.01)
@@ -866,6 +895,36 @@ class MultiFunctionClient:
                 time.sleep(0.05)
 
     # 刷新窗口顶部显示的简要状态栏。
+    def _mix_multicast_frames(self, frames):
+        if not frames:
+            return b""
+
+        sample_arrays = []
+        min_len = None
+        for data in frames:
+            samples = array("h")
+            samples.frombytes(data)
+            if not samples:
+                continue
+            sample_arrays.append(samples)
+            min_len = len(samples) if min_len is None else min(min_len, len(samples))
+
+        if not sample_arrays or not min_len:
+            return b""
+
+        mixed = array("h", [0]) * min_len
+        for i in range(min_len):
+            total = 0
+            for samples in sample_arrays:
+                total += samples[i]
+            if total > 32767:
+                total = 32767
+            elif total < -32768:
+                total = -32768
+            mixed[i] = total
+
+        return mixed.tobytes()
+
     def update_status(self):
         state_map = {
             "IDLE": "空闲",
