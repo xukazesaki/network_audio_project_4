@@ -33,7 +33,6 @@ EXPECTED_UDP_AUDIO_BYTES = CHUNK * 2
 
 # 新增：维护当前已加入组播会议的用户
 multicast_members = set()
-mcast_audio_stats = {}
 udp_clients = set()
 udp_clients_lock = threading.Lock()
 udp_relay_stats = {"registered": 0, "audio_packets": 0, "forwarded_packets": 0}
@@ -177,10 +176,6 @@ def print_probe_status():
 
     with clients_lock:
         members = sorted(multicast_members)
-        audio_stats = {
-            username: stats.copy()
-            for username, stats in sorted(mcast_audio_stats.items())
-        }
 
     print("[PROBE] 语音转发概览：")
     print(
@@ -189,14 +184,7 @@ def print_probe_status():
         f"audio_packets={relay_stats['audio_packets']} forwarded_packets={relay_stats['forwarded_packets']}"
     )
     print(f"[PROBE] meeting_members={', '.join(members) if members else '(empty)'}")
-
-    if not audio_stats:
-        print("[PROBE] 暂无 TCP 会议语音统计")
-        return
-
-    print("[PROBE] TCP 会议语音统计：")
-    for username, stats in audio_stats.items():
-        print(f"  - {username}: in={stats.get('in', 0)} out={stats.get('out', 0)}")
+    print("[PROBE] meeting_audio=IGMP multicast direct; server does not relay group audio")
 
 
 # 移除一个已断开的客户端，并刷新全局在线列表。
@@ -208,7 +196,6 @@ def remove_client(username):
         conn = clients.pop(username, None)
         client_send_locks.pop(username, None)
         multicast_members.discard(username)
-        mcast_audio_stats.pop(username, None)
 
     if conn is not None:
         try:
@@ -450,27 +437,7 @@ def handle_client(conn, addr):
                 continue
 
             if msg_type == "mcast_audio":
-                if not payload or len(payload) != EXPECTED_UDP_AUDIO_BYTES:
-                    continue
-                with clients_lock:
-                    stats = mcast_audio_stats.setdefault(my_name, {"in": 0, "out": 0})
-                    stats["in"] += 1
-                    recipients = [
-                        name
-                        for name in multicast_members
-                        if name != my_name and name in clients
-                    ]
-                for username in recipients:
-                    if _safe_send(username, "mcast_audio", my_name, {}, payload):
-                        with clients_lock:
-                            stats = mcast_audio_stats.setdefault(my_name, {"in": 0, "out": 0})
-                            stats["out"] += 1
-                if mcast_audio_stats.get(my_name, {}).get("in", 0) % 100 == 0:
-                    stats = mcast_audio_stats.get(my_name, {"in": 0, "out": 0})
-                    print(
-                        f"[MCAST/TCP] {my_name} audio frames in={stats['in']} "
-                        f"forwarded={stats['out']} members={len(recipients) + 1}"
-                    )
+                print(f"[MCAST] ignored legacy TCP group audio from {my_name}")
                 continue
 
             extra = {

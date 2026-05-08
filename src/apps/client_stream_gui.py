@@ -26,6 +26,7 @@ from src.core.config import (
 )
 
 
+from src.core.multicast_audio import MulticastReceiver, MulticastSender
 from src.core.protocol import recv_packet, send_packet
 
 UDP_REGISTER_PACKET = b"__udp_register__"
@@ -53,7 +54,8 @@ class MultiFunctionClient:
         # 新增组播通话状态
         self.multicast_joined = False
         self.multicast_speaking = False
-        self.multicast_buffer = collections.deque(maxlen=JITTER_BUFFER_MAXLEN)
+        self.multicast_buffer = {}
+        self.multicast_buffer_lock = threading.Lock()
         self.multicast_sender = None
         self.multicast_receiver = None
 
@@ -691,16 +693,18 @@ class MultiFunctionClient:
             return
 
         try:
-            self.multicast_receiver = None
-            self.multicast_sender = None
+            self.multicast_receiver = MulticastReceiver()
+            self.multicast_sender = MulticastSender(sender_id=self.my_name or "unknown")
             self.multicast_joined = True
             self.multicast_speaking = False
-            self.multicast_buffer.clear()
+            with self.multicast_buffer_lock:
+                self.multicast_buffer.clear()
             self.current_session = "group"
             self.clear_chat_display()
 
             # 新增：通知服务器同步组播成员列表
             self.send_to_server("mcast_join", self.my_name)
+            threading.Thread(target=self.multicast_receive_thread, daemon=True).start()
 
             self.log(
                 "[系统] 已加入多人语音会议，现在可以开始多人通话",
@@ -730,7 +734,8 @@ class MultiFunctionClient:
 
         self.multicast_speaking = False
         self.multicast_joined = False
-        self.multicast_buffer.clear()
+        with self.multicast_buffer_lock:
+            self.multicast_buffer.clear()
 
         if self.multicast_receiver is not None:
             self.multicast_receiver.close()
@@ -763,6 +768,8 @@ class MultiFunctionClient:
         pa = pyaudio.PyAudio()
         stream = None
         try:
+            if self.multicast_sender is None:
+                raise RuntimeError("multicast sender is not ready")
             stream = pa.open(
                 format=FORMAT,
                 channels=CHANNELS,
@@ -772,7 +779,7 @@ class MultiFunctionClient:
             )
             while self.running and self.multicast_joined and self.multicast_speaking:
                 data = stream.read(CHUNK, exception_on_overflow=False)
-                self.send_to_server("mcast_audio", self.my_name, {}, data)
+                self.multicast_sender.send(data)
         except Exception as e:
             if self.running:
                 self.safe_log(f"[系统] 会议发言失败: {e}", align="center")
@@ -798,7 +805,13 @@ class MultiFunctionClient:
                     continue
                 if len(data) != self.expected_udp_bytes:
                     continue
-                self.multicast_buffer.append(data)
+                sender = header.get("sender", "unknown")
+                with self.multicast_buffer_lock:
+                    queue = self.multicast_buffer.setdefault(
+                        sender,
+                        collections.deque(maxlen=JITTER_BUFFER_MAXLEN),
+                    )
+                    queue.append(data)
             except Exception as e:
                 if self.running and self.multicast_joined:
                     self.safe_log(f"[系统] 接收会议语音失败: {e}", align="center")
@@ -839,7 +852,12 @@ class MultiFunctionClient:
                     self.buffer.append(payload)
             elif msg_type == "mcast_audio":
                 if self.multicast_joined and payload and len(payload) == self.expected_udp_bytes:
-                    self.multicast_buffer.append(payload)
+                    with self.multicast_buffer_lock:
+                        queue = self.multicast_buffer.setdefault(
+                            sender,
+                            collections.deque(maxlen=JITTER_BUFFER_MAXLEN),
+                        )
+                        queue.append(payload)
             elif msg_type == "file":
                 filename = header.get("filename", "new_file.bin")
                 os.makedirs(RECEIVE_DIR, exist_ok=True)
@@ -925,12 +943,14 @@ class MultiFunctionClient:
 
             # 组播播放：每次只播一帧！！！（修复回音+听不到）
             elif (self.multicast_joined
-                  and len(self.multicast_buffer) > 0
                   and self.play_stream is not None):
                 # 只取一帧播放，不要一次性取完
-                data = self.multicast_buffer.popleft()
-                self.play_stream.write(data)
-                played = True
+                frames = self._get_multicast_frames_for_playback()
+                if frames:
+                    mixed_data = self._mix_multicast_frames(frames)
+                    if mixed_data:
+                        self.play_stream.write(mixed_data)
+                        played = True
 
             if not played:
                 time.sleep(0.005)  # 更小延迟
@@ -940,6 +960,22 @@ class MultiFunctionClient:
                 self.safe_log(f"[系统] 播放失败: {e}", align="center")
             time.sleep(0.01)
     # 刷新窗口顶部显示的简要状态栏。
+    def _get_multicast_frames_for_playback(self):
+        frames = []
+        stale_senders = []
+
+        with self.multicast_buffer_lock:
+            for sender, queue in self.multicast_buffer.items():
+                if queue:
+                    frames.append(queue.popleft())
+                if not queue:
+                    stale_senders.append(sender)
+
+            for sender in stale_senders:
+                self.multicast_buffer.pop(sender, None)
+
+        return frames
+
     def _mix_multicast_frames(self, frames):
         if not frames:
             return b""
