@@ -8,7 +8,7 @@ from src.core.multicast_audio import MulticastReceiver, MulticastSender
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Probe UDP multicast connectivity.")
+    parser = argparse.ArgumentParser(description="Probe meeting audio connectivity.")
     parser.add_argument("--name", default=socket.gethostname(), help="name shown in probe packets")
     parser.add_argument("--interval", type=float, default=1.0, help="seconds between probe packets")
     parser.add_argument("--loopback", action="store_true", help="receive multicast sent by this host")
@@ -32,6 +32,7 @@ def main() -> None:
     thread = threading.Thread(target=receive_loop, daemon=True)
     thread.start()
 
+    print("[probe] external probe started; prefer `server> probe` for integrated server status", flush=True)
     print(f"[probe] multicast group={MCAST_GRP}:{MCAST_PORT} sender={sender_id}", flush=True)
     try:
         seq = 0

@@ -11,9 +11,10 @@ RECEIVE_DIR = DATA_DIR / "received"
 CLIENT_DATA_DIR = DATA_DIR / "client"
 SERVER_DATA_DIR = DATA_DIR / "server"
 SERVER_RECEIVE_DIR = DATA_DIR / "server_received"
+SERVER_STOP_SIGNAL_FILE = SERVER_DATA_DIR / "stop.signal"
 
 # TCP network settings (原有服务器通信)
-HOST = "127.0.0.1"
+HOST = "10.192.28.200"
 SERVER_BIND_HOST = "0.0.0.0"
 PORT = 8080
 UDP_PORT = 5008

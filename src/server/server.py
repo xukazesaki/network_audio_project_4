@@ -6,7 +6,18 @@ import time
 import wave
 
 from src.core.audio_manager import AudioManager
-from src.core.config import CHANNELS, CHUNK, FORMAT, HOST, PORT, RATE, SERVER_BIND_HOST, SERVER_RECEIVE_DIR, UDP_PORT
+from src.core.config import (
+    CHANNELS,
+    CHUNK,
+    FORMAT,
+    HOST,
+    PORT,
+    RATE,
+    SERVER_BIND_HOST,
+    SERVER_RECEIVE_DIR,
+    SERVER_STOP_SIGNAL_FILE,
+    UDP_PORT,
+)
 from src.core.protocol import recv_packet, send_packet
 from src.server.auth_service import AuthService
 
@@ -25,11 +36,29 @@ multicast_members = set()
 mcast_audio_stats = {}
 udp_clients = set()
 udp_clients_lock = threading.Lock()
+udp_relay_stats = {"registered": 0, "audio_packets": 0, "forwarded_packets": 0}
 
 
 # 确保服务端运行前，音频与账户相关的本地目录已经存在。
 def ensure_server_dirs():
     os.makedirs(SERVER_RECEIVE_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(SERVER_STOP_SIGNAL_FILE), exist_ok=True)
+    clear_stop_signal()
+
+
+def clear_stop_signal():
+    try:
+        if os.path.exists(SERVER_STOP_SIGNAL_FILE):
+            os.remove(SERVER_STOP_SIGNAL_FILE)
+    except Exception:
+        pass
+
+
+def check_stop_signal() -> bool:
+    if not os.path.exists(SERVER_STOP_SIGNAL_FILE):
+        return False
+    clear_stop_signal()
+    return True
 
 
 # 安全地向某个在线用户发送数据包；失败时自动移除断开的连接。
@@ -90,6 +119,84 @@ def list_clients():
     print("[*] 当前在线客户端：")
     for idx, name in enumerate(names, start=1):
         print(f"    {idx}. {name}")
+
+
+def print_server_panel():
+    print("\n服务端控制台：")
+    print("  status                       查看服务端概览")
+    print("  users                        查看在线用户和会议成员")
+    print("  probe                        查看语音转发/测速状态")
+    print("  say all <消息>                向所有客户端广播文本")
+    print("  say <用户> <消息>             向指定用户发送文本")
+    print("  audio send <用户> <路径>      向指定用户发送音频文件")
+    print("  audio play last              播放最近收到的音频")
+    print("  audio play <路径>            播放指定音频文件")
+    print("  shutdown                     优雅关闭服务端\n")
+
+
+def print_server_status():
+    with clients_lock:
+        online_count = len(clients)
+        meeting_count = len(multicast_members)
+
+    with udp_clients_lock:
+        udp_count = len(udp_clients)
+
+    print("[STATUS] 服务端运行中")
+    print(f"[STATUS] online_users={online_count} meeting_members={meeting_count} udp_sources={udp_count}")
+    if last_received_audio:
+        print(f"[STATUS] last_audio={last_received_audio}")
+    else:
+        print("[STATUS] last_audio=none")
+
+
+def print_user_status():
+    with clients_lock:
+        online_users = sorted(clients.keys())
+        members = sorted(multicast_members)
+
+    print("[USERS] 在线用户：")
+    if not online_users:
+        print("  (empty)")
+    else:
+        for idx, name in enumerate(online_users, start=1):
+            print(f"  {idx}. {name}")
+
+    print("[USERS] 会议成员：")
+    if not members:
+        print("  (empty)")
+    else:
+        for idx, name in enumerate(members, start=1):
+            print(f"  {idx}. {name}")
+
+
+def print_probe_status():
+    with udp_clients_lock:
+        udp_count = len(udp_clients)
+        relay_stats = dict(udp_relay_stats)
+
+    with clients_lock:
+        members = sorted(multicast_members)
+        audio_stats = {
+            username: stats.copy()
+            for username, stats in sorted(mcast_audio_stats.items())
+        }
+
+    print("[PROBE] 语音转发概览：")
+    print(
+        "[PROBE] "
+        f"udp_sources={udp_count} registered={relay_stats['registered']} "
+        f"audio_packets={relay_stats['audio_packets']} forwarded_packets={relay_stats['forwarded_packets']}"
+    )
+    print(f"[PROBE] meeting_members={', '.join(members) if members else '(empty)'}")
+
+    if not audio_stats:
+        print("[PROBE] 暂无 TCP 会议语音统计")
+        return
+
+    print("[PROBE] TCP 会议语音统计：")
+    for username, stats in audio_stats.items():
+        print(f"  - {username}: in={stats.get('in', 0)} out={stats.get('out', 0)}")
 
 
 # 移除一个已断开的客户端，并刷新全局在线列表。
@@ -176,6 +283,13 @@ def start_udp_audio_relay():
         relay_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         relay_sock.bind(("0.0.0.0", UDP_PORT))
         relay_sock.setblocking(False)
+        if hasattr(socket, "SIO_UDP_CONNRESET"):
+            try:
+                # On Windows, ignore ICMP "port unreachable" resets so the relay
+                # thread does not crash after forwarding to a stale UDP endpoint.
+                relay_sock.ioctl(socket.SIO_UDP_CONNRESET, False)
+            except OSError:
+                pass
     except OSError as e:
         print(f"[!] [UDP] relay failed to start on port {UDP_PORT}: {e}")
         return
@@ -192,6 +306,15 @@ def start_udp_audio_relay():
                 data, addr = relay_sock.recvfrom(8192)
             except BlockingIOError:
                 continue
+            except ConnectionResetError as e:
+                print(f"[!] [UDP] ignored reset from stale endpoint: {e}")
+                continue
+            except OSError as e:
+                if not server_running:
+                    break
+                print(f"[!] [UDP] relay recv failed, keep running: {e}")
+                time.sleep(0.05)
+                continue
 
             if not data:
                 continue
@@ -199,6 +322,7 @@ def start_udp_audio_relay():
             with udp_clients_lock:
                 if addr not in udp_clients:
                     udp_clients.add(addr)
+                    udp_relay_stats["registered"] += 1
                     print(f"[UDP] new audio source: {addr}")
                 recipients = [client_addr for client_addr in udp_clients if client_addr != addr]
 
@@ -208,10 +332,15 @@ def start_udp_audio_relay():
             if len(data) != EXPECTED_UDP_AUDIO_BYTES:
                 continue
 
+            with udp_clients_lock:
+                udp_relay_stats["audio_packets"] += 1
+
             stale_clients = []
             for client_addr in recipients:
                 try:
                     relay_sock.sendto(data, client_addr)
+                    with udp_clients_lock:
+                        udp_relay_stats["forwarded_packets"] += 1
                 except Exception:
                     stale_clients.append(client_addr)
 
@@ -222,7 +351,11 @@ def start_udp_audio_relay():
     finally:
         with udp_clients_lock:
             udp_clients.clear()
-        relay_sock.close()
+        try:
+            relay_sock.close()
+        except Exception:
+            pass
+        print("[*] [UDP] relay stopped")
 
 
 def handle_auth_message(conn, msg_type, sender, current_user=None):
@@ -379,29 +512,181 @@ def handle_client(conn, addr):
         remove_client(my_name)
 
 
-# 打印服务端控制台支持的命令列表。
 def print_help():
-    print("\n服务端可用命令：")
-    print("  help                         查看命令")
-    print("  list                         查看在线客户端")
-    print("  all <消息>                   向所有客户端广播文本")
-    print("  to <用户名> <消息>           向指定用户发送文本")
-    print("  sendaudio <用户名> <路径>    向指定用户发送音频文件")
-    print("  playlast                     播放最近收到的音频")
-    print("  playaudio <路径>             播放指定音频文件")
-    print("  quit                         关闭服务器\n")
+    print_server_panel()
+
+
+def shutdown_server(server_socket: socket.socket):
+    global server_running
+
+    if not server_running:
+        return
+
+    print("[*] 正在关闭服务端...")
+    server_running = False
+    send_text_to_all("服务器即将关闭")
+    clear_stop_signal()
+    try:
+        server_socket.close()
+    except Exception:
+        pass
+
+
+def play_audio_file(audio: AudioManager | None, file_path: str):
+    if not os.path.exists(file_path):
+        print(f"[AUDIO] 文件不存在: {file_path}")
+        return
+    if audio is None:
+        print("[AUDIO] 当前环境无法播放，请先安装 pyaudio")
+        return
+
+    try:
+        audio.play_audio(_read_wave_as_pcm(file_path))
+        print(f"[AUDIO] 正在播放: {file_path}")
+    except Exception as e:
+        print(f"[AUDIO] 播放失败: {e}")
+
+
+def handle_visible_admin_command(cmd: str, audio: AudioManager | None, server_socket: socket.socket) -> bool:
+    if cmd in {"help", "panel"}:
+        print_server_panel()
+        return True
+
+    if cmd == "status":
+        print_server_status()
+        return True
+
+    if cmd == "users":
+        print_user_status()
+        return True
+
+    if cmd == "probe":
+        print_probe_status()
+        return True
+
+    if cmd.startswith("say all "):
+        text = cmd[8:].strip()
+        if not text:
+            print("格式错误，应为：say all <消息>")
+            return True
+        send_text_to_all(text)
+        return True
+
+    if cmd.startswith("say "):
+        parts = cmd.split(" ", 2)
+        if len(parts) < 3:
+            print("格式错误，应为：say <用户> <消息>")
+            return True
+        target = parts[1].strip()
+        text = parts[2].strip()
+        ok = send_text_to_client(target, text)
+        if not ok:
+            print(f"[!] 用户 {target} 不在线或不存在")
+        return True
+
+    if cmd.startswith("audio send "):
+        parts = cmd.split(" ", 3)
+        if len(parts) < 4:
+            print("格式错误，应为：audio send <用户> <音频路径>")
+            return True
+        target = parts[2].strip()
+        file_path = parts[3].strip()
+        ok = send_audio_to_client(target, file_path)
+        if ok:
+            print(f"[AUDIO] 已发送给 {target}: {file_path}")
+        else:
+            print("[AUDIO] 发送失败，用户不存在或文件不存在")
+        return True
+
+    if cmd == "audio play last":
+        if not last_received_audio:
+            print("[AUDIO] 当前还没有收到任何音频")
+            return True
+        play_audio_file(audio, last_received_audio)
+        return True
+
+    if cmd.startswith("audio play "):
+        file_path = cmd[len("audio play "):].strip()
+        if not file_path:
+            print("格式错误，应为：audio play <路径>")
+            return True
+        play_audio_file(audio, file_path)
+        return True
+
+    if cmd in {"shutdown", "exit", "stop"}:
+        shutdown_server(server_socket)
+        return True
+
+    return False
+
+
+def handle_legacy_admin_command(cmd: str, audio: AudioManager | None, server_socket: socket.socket) -> bool:
+    if cmd == "list":
+        list_clients()
+        return True
+
+    if cmd.startswith("all "):
+        text = cmd[4:].strip()
+        if text:
+            send_text_to_all(text)
+        return True
+
+    if cmd.startswith("to "):
+        parts = cmd.split(" ", 2)
+        if len(parts) < 3:
+            print("格式错误，应为：to <用户名> <消息>")
+            return True
+        target = parts[1].strip()
+        text = parts[2].strip()
+        ok = send_text_to_client(target, text)
+        if not ok:
+            print(f"[!] 用户 {target} 不在线或不存在")
+        return True
+
+    if cmd.startswith("sendaudio "):
+        parts = cmd.split(" ", 2)
+        if len(parts) < 3:
+            print("格式错误，应为：sendaudio <用户名> <音频路径>")
+            return True
+        target = parts[1].strip()
+        file_path = parts[2].strip()
+        ok = send_audio_to_client(target, file_path)
+        if ok:
+            print(f"[AUDIO] 已发送给 {target}: {file_path}")
+        else:
+            print("[AUDIO] 发送失败，用户不存在或文件不存在")
+        return True
+
+    if cmd == "playlast":
+        if not last_received_audio:
+            print("[AUDIO] 当前还没有收到任何音频")
+            return True
+        play_audio_file(audio, last_received_audio)
+        return True
+
+    if cmd.startswith("playaudio "):
+        file_path = cmd[len("playaudio "):].strip()
+        if not file_path:
+            print("格式错误，应为：playaudio <路径>")
+            return True
+        play_audio_file(audio, file_path)
+        return True
+
+    if cmd == "quit":
+        shutdown_server(server_socket)
+        return True
+
+    return False
 
 
 # 运行服务端控制台输入循环，处理管理员命令。
 def server_input_loop(server_socket: socket.socket):
-    global server_running
-
     try:
         audio = AudioManager()
     except Exception:
         audio = None
 
-    print_help()
+    print_server_panel()
 
     while server_running:
         try:
@@ -409,95 +694,16 @@ def server_input_loop(server_socket: socket.socket):
             if not cmd:
                 continue
 
-            if cmd == "help":
-                print_help()
+            if handle_visible_admin_command(cmd, audio, server_socket):
                 continue
 
-            if cmd == "list":
-                list_clients()
+            if handle_legacy_admin_command(cmd, audio, server_socket):
                 continue
 
-            if cmd.startswith("all "):
-                text = cmd[4:].strip()
-                if text:
-                    send_text_to_all(text)
-                continue
-
-            if cmd.startswith("to "):
-                parts = cmd.split(" ", 2)
-                if len(parts) < 3:
-                    print("格式错误，应为：to <用户名> <消息>")
-                    continue
-
-                target = parts[1].strip()
-                text = parts[2].strip()
-                ok = send_text_to_client(target, text)
-                if not ok:
-                    print(f"[!] 用户 {target} 不在线或不存在")
-                continue
-
-            if cmd.startswith("sendaudio "):
-                parts = cmd.split(" ", 2)
-                if len(parts) < 3:
-                    print("格式错误，应为：sendaudio <用户名> <音频路径>")
-                    continue
-
-                target = parts[1].strip()
-                file_path = parts[2].strip()
-                ok = send_audio_to_client(target, file_path)
-                if ok:
-                    print(f"[AUDIO] 已发送给 {target}: {file_path}")
-                else:
-                    print("[AUDIO] 发送失败，用户不存在或文件不存在")
-                continue
-
-            if cmd == "playlast":
-                if not last_received_audio:
-                    print("[AUDIO] 当前还没有收到任何音频")
-                    continue
-                if audio is None:
-                    print("[AUDIO] 当前环境无法播放，请先安装 pyaudio")
-                    continue
-
-                try:
-                    audio.play_audio(_read_wave_as_pcm(last_received_audio))
-                    print(f"[AUDIO] 正在播放: {last_received_audio}")
-                except Exception as e:
-                    print(f"[AUDIO] 播放失败: {e}")
-                continue
-
-            if cmd.startswith("playaudio "):
-                file_path = cmd[len("playaudio "):].strip()
-                if not file_path:
-                    print("格式错误，应为：playaudio <路径>")
-                    continue
-                if not os.path.exists(file_path):
-                    print(f"[AUDIO] 文件不存在: {file_path}")
-                    continue
-                if audio is None:
-                    print("[AUDIO] 当前环境无法播放，请先安装 pyaudio")
-                    continue
-
-                try:
-                    audio.play_audio(_read_wave_as_pcm(file_path))
-                    print(f"[AUDIO] 正在播放: {file_path}")
-                except Exception as e:
-                    print(f"[AUDIO] 播放失败: {e}")
-                continue
-
-            if cmd == "quit":
-                print("[*] 正在关闭服务器...")
-                server_running = False
-                send_text_to_all("服务器即将关闭")
-                try:
-                    server_socket.close()
-                except Exception:
-                    pass
-                break
-
-            print("未知命令，输入 help 查看可用命令")
+            print("未知命令，输入 help 查看当前面板命令")
 
         except EOFError:
+            shutdown_server(server_socket)
             break
         except Exception as e:
             print(f"[!] 服务端输入线程异常: {e}")
@@ -522,6 +728,7 @@ if __name__ == "__main__":
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind((SERVER_BIND_HOST, PORT))
     server_socket.listen(10)
+    server_socket.settimeout(1.0)
     print(f"服务器已启动: {SERVER_BIND_HOST}:{PORT} (client HOST={HOST})")
 
     udp_thread = threading.Thread(target=start_udp_audio_relay, daemon=True)
@@ -532,8 +739,14 @@ if __name__ == "__main__":
 
     try:
         while server_running:
+            if check_stop_signal():
+                print("[*] 检测到 stop.signal，准备关闭服务端")
+                shutdown_server(server_socket)
+                break
             try:
                 client_conn, client_addr = server_socket.accept()
+            except socket.timeout:
+                continue
             except OSError:
                 break
             threading.Thread(target=handle_client, args=(client_conn, client_addr), daemon=True).start()
